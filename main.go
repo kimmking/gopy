@@ -2,7 +2,9 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"unicode"
@@ -44,7 +46,21 @@ const (
 	flowBreak
 	flowContinue
 	flowReturn
+	flowError
 )
+
+// runtimeError 表示可捕获的运行时错误（配合 try/except）
+type runtimeError struct {
+	msg string
+}
+
+func (e runtimeError) Error() string {
+	return e.msg
+}
+
+func rtPanic(msg string) {
+	panic(runtimeError{msg: msg})
+}
 
 // Dict 表示保持插入顺序的字典（Python 3.7+ 字典有序）
 type Dict struct {
@@ -72,10 +88,81 @@ func (d *Dict) Len() int {
 	return len(d.keys)
 }
 
+// Tuple 表示 Python 元组，print 输出 (a, b)
+type Tuple []interface{}
+
+// Instance 表示类的实例，fields 存放属性
+type Instance struct {
+	cls    *ClassDef
+	fields map[string]interface{}
+}
+
+// ClassDef 表示类定义，methods 存放方法（含 __init__）
+type ClassDef struct {
+	name    string
+	methods map[string]Func
+	init    Func
+	hasInit bool
+}
+
+// Module 表示内置模块（如 import math）
+type Module struct {
+	name   string
+	funcs  map[string]func(args []interface{}) interface{}
+	consts map[string]interface{}
+}
+
+// sortList 对列表做升序排序（数值按数值比，否则按字符串比）
+func sortList(list []interface{}) []interface{} {
+	out := make([]interface{}, len(list))
+	copy(out, list)
+	sort.SliceStable(out, func(a, b int) bool {
+		af, aok := toFloat(out[a])
+		bf, bok := toFloat(out[b])
+		if aok && bok {
+			return af < bf
+		}
+		return fmt.Sprintf("%v", out[a]) < fmt.Sprintf("%v", out[b])
+	})
+	return out
+}
+
+// sliceBounds 归一化切片边界，支持负数索引；endGiven 区分“缺省到末尾”与“显式 -1”
+func sliceBounds(start, end, n int, endGiven bool) (int, int) {
+	s := start
+	if s < 0 {
+		s = n + s
+	}
+	if s < 0 {
+		s = 0
+	}
+	if s > n {
+		s = n
+	}
+	e := n
+	if endGiven {
+		e = end
+		if e < 0 {
+			e = n + e
+		}
+		if e < 0 {
+			e = 0
+		}
+		if e > n {
+			e = n
+		}
+	}
+	if e < s {
+		e = s
+	}
+	return s, e
+}
+
 type Interpreter struct {
 	env      map[string]interface{}
 	returned bool
 	retVal   interface{}
+	lastErr  error
 }
 
 func NewInterpreter() *Interpreter {
@@ -127,7 +214,17 @@ func findBlockEnd(stmts []stmt, pc int) int {
 
 // ============ 语句执行 ============
 
-func (i *Interpreter) execStmts(stmts []stmt) flowKind {
+func (i *Interpreter) execStmts(stmts []stmt) (result flowKind) {
+	defer func() {
+		if r := recover(); r != nil {
+			if re, ok := r.(runtimeError); ok {
+				i.lastErr = re
+				result = flowError
+			} else {
+				panic(r)
+			}
+		}
+	}()
 	pc := 0
 	for pc < len(stmts) {
 		s := stmts[pc]
@@ -285,6 +382,89 @@ func (i *Interpreter) execStmts(stmts []stmt) flowKind {
 			return flowReturn
 		}
 
+		// ===== try / except 异常处理 =====
+		if strings.HasPrefix(text, "try") && strings.HasSuffix(text, ":") {
+			bodyEnd := findBlockEnd(stmts, pc)
+			exceptEnd := findBlockEnd(stmts, bodyEnd)
+			i.lastErr = nil
+			fk := i.execStmts(stmts[pc+1 : bodyEnd])
+			if fk == flowError {
+				i.lastErr = nil
+				i.execStmts(stmts[bodyEnd+1 : exceptEnd])
+			} else if fk != flowNormal {
+				return fk
+			}
+			pc = exceptEnd
+			continue
+		}
+
+		// ===== class 类定义 =====
+		if strings.HasPrefix(text, "class ") && strings.HasSuffix(text, ":") {
+			bodyEnd := findBlockEnd(stmts, pc)
+			name := strings.TrimSpace(text[len("class "):len(text)-1])
+			cls := &ClassDef{name: name, methods: map[string]Func{}}
+			j := pc + 1
+			for j < bodyEnd {
+				bs := stmts[j]
+				if strings.HasPrefix(bs.text, "def ") && strings.HasSuffix(bs.text, ":") {
+					mbEnd := findBlockEnd(stmts, j)
+					header := bs.text[4 : len(bs.text)-1]
+					if lp := strings.Index(header, "("); lp > 0 {
+						mname := strings.TrimSpace(header[:lp])
+						paramsStr := strings.TrimSpace(header[lp+1 : len(header)-1])
+						var params []string
+						if paramsStr != "" {
+							for _, p := range strings.Split(paramsStr, ",") {
+								params = append(params, strings.TrimSpace(p))
+							}
+						}
+						fn := Func{params: params, body: stmts[j+1 : mbEnd]}
+						cls.methods[mname] = fn
+						if mname == "__init__" {
+							cls.init = fn
+							cls.hasInit = true
+						}
+					}
+					j = mbEnd
+				} else {
+					j++
+				}
+			}
+			i.env[name] = cls
+			pc = bodyEnd
+			continue
+		}
+
+		// ===== import 模块 =====
+		if strings.HasPrefix(text, "import ") {
+			mod := strings.TrimSpace(text[len("import "):])
+			switch mod {
+			case "math":
+				i.env[mod] = mathModule()
+			}
+			pc++
+			continue
+		}
+
+		// ===== 属性赋值：obj.attr = expr =====
+		if idx := strings.Index(text, "="); idx > 0 && !strings.ContainsAny(text[:idx], "!<>") {
+			left := strings.TrimSpace(text[:idx])
+			if di := strings.Index(left, "."); di > 0 {
+				objName := strings.TrimSpace(left[:di])
+				attr := strings.TrimSpace(left[di+1:])
+				if v, ok := i.env[objName]; ok {
+					if inst, ok := v.(*Instance); ok {
+						expr := strings.TrimSpace(text[idx+1:])
+						if val, err := i.evalExpr(expr); err == nil {
+							inst.fields[attr] = val
+							pc++
+							continue
+						}
+					}
+				}
+			}
+		}
+
 		// print
 		if strings.HasPrefix(text, "print(") && strings.HasSuffix(text, ")") {
 			inner := strings.TrimSpace(text[len("print(") : len(text)-1])
@@ -399,6 +579,70 @@ func (i *Interpreter) callFunc(fn Func, args []interface{}) interface{} {
 	return res
 }
 
+// callMethodOn 调用实例方法，把 self 绑定到实例，并跳过 self 形参
+func (i *Interpreter) callMethodOn(inst *Instance, fn Func, args []interface{}) interface{} {
+	saved := i.env
+	local := make(map[string]interface{})
+	for k, v := range saved {
+		local[k] = v
+	}
+	local["self"] = inst
+	argIdx := 0
+	for _, p := range fn.params {
+		if p == "self" {
+			continue
+		}
+		if argIdx < len(args) {
+			local[p] = args[argIdx]
+		} else {
+			local[p] = nil
+		}
+		argIdx++
+	}
+	i.env = local
+	i.retVal = nil
+	i.execStmts(fn.body)
+	res := i.retVal
+	i.env = saved
+	i.retVal = nil
+	return res
+}
+
+// evalArgs 把调用参数解析为值列表
+func (i *Interpreter) evalArgs(argsStr string) []interface{} {
+	var argVals []interface{}
+	if argsStr != "" {
+		for _, a := range splitArgs(argsStr) {
+			av, err := i.evalExpr(a)
+			if err != nil {
+				av = nil
+			}
+			argVals = append(argVals, av)
+		}
+	}
+	return argVals
+}
+
+// mathModule 提供 import math 支持的内置函数
+func mathModule() *Module {
+	return &Module{
+		name: "math",
+		funcs: map[string]func(args []interface{}) interface{}{
+			"floor": func(args []interface{}) interface{} {
+				f, _ := toFloat(args[0])
+				return int(math.Floor(f))
+			},
+			"sqrt": func(args []interface{}) interface{} {
+				f, _ := toFloat(args[0])
+				return math.Sqrt(f)
+			},
+		},
+		consts: map[string]interface{}{
+			"pi": math.Pi,
+		},
+	}
+}
+
 // ============ 表达式求值 ============
 
 func (i *Interpreter) evalExpr(expr string) (interface{}, error) {
@@ -424,6 +668,10 @@ func (i *Interpreter) evalExpr(expr string) (interface{}, error) {
 	// str(...) 内联
 	if strings.Contains(expr, "str(") {
 		expr = strings.TrimSpace(inlineStrCalls(expr, i))
+	}
+	// 调用结果内联（如 self.double() * 2、len(x) + 1）
+	if strings.Contains(expr, "(") {
+		expr = strings.TrimSpace(inlineCalls(expr, i))
 	}
 	// 列表字面量
 	if strings.HasPrefix(expr, "[") && strings.HasSuffix(expr, "]") {
@@ -473,6 +721,51 @@ func (i *Interpreter) evalExpr(expr string) (interface{}, error) {
 				} else {
 					return nil, fmt.Errorf("unknown var %s", objName)
 				}
+				// 原地修改类方法：需把结果写回 env
+				switch m := objVal.(type) {
+				case []interface{}:
+					if method == "pop" && len(m) > 0 {
+						last := m[len(m)-1]
+						i.env[objName] = m[:len(m)-1]
+						return last, nil
+					}
+					if method == "sort" {
+						sorted := sortList(m)
+						i.env[objName] = sorted
+						return sorted, nil
+					}
+				case *Dict:
+					switch method {
+					case "keys":
+						var out []interface{}
+						for _, k := range m.keys {
+							out = append(out, k)
+						}
+						return out, nil
+					case "values":
+						var out []interface{}
+						for _, k := range m.keys {
+							out = append(out, m.vals[k])
+						}
+						return out, nil
+					case "items":
+						var out []interface{}
+						for _, k := range m.keys {
+							out = append(out, Tuple{k, m.vals[k]})
+						}
+						return out, nil
+					}
+				case *Instance:
+					if fn, ok := m.cls.methods[method]; ok {
+						args := i.evalArgs(argsStr)
+						return i.callMethodOn(m, fn, args), nil
+					}
+				case *Module:
+					if fn, ok := m.funcs[method]; ok {
+						args := i.evalArgs(argsStr)
+						return fn(args), nil
+					}
+				}
 				return callMethod(method, objVal, argsStr, i)
 			}
 			switch callee {
@@ -492,6 +785,25 @@ func (i *Interpreter) evalExpr(expr string) (interface{}, error) {
 					return x.Len(), nil
 				}
 				return 0, nil
+			case "list":
+				av, _ := i.evalExpr(argsStr)
+				switch x := av.(type) {
+				case []string:
+					var out []interface{}
+					for _, s := range x {
+						out = append(out, s)
+					}
+					return out, nil
+				case []interface{}:
+					return x, nil
+				case *Dict:
+					var out []interface{}
+					for _, k := range x.keys {
+						out = append(out, k)
+					}
+					return out, nil
+				}
+				return av, nil
 			case "range":
 				parts := splitArgs(argsStr)
 				start, end := 0, 0
@@ -510,6 +822,14 @@ func (i *Interpreter) evalExpr(expr string) (interface{}, error) {
 				}
 				return out, nil
 			default:
+				if cls, ok := i.env[callee].(*ClassDef); ok {
+					inst := &Instance{cls: cls, fields: map[string]interface{}{}}
+					if cls.hasInit {
+						args := i.evalArgs(argsStr)
+						i.callMethodOn(inst, cls.init, args)
+					}
+					return inst, nil
+				}
 				if fn, ok := i.env[callee].(Func); ok {
 					var argVals []interface{}
 					if argsStr != "" {
@@ -544,7 +864,9 @@ func (i *Interpreter) evalExpr(expr string) (interface{}, error) {
 			if strings.Contains(idxStr, ":") {
 				parts := strings.Split(idxStr, ":")
 				start := 0
-				end := -1
+				end := 0
+				endGiven := false
+				step := 1
 				if ps := strings.TrimSpace(parts[0]); ps != "" {
 					if sv, err := i.evalExpr(ps); err == nil {
 						start = toInt(sv)
@@ -554,43 +876,69 @@ func (i *Interpreter) evalExpr(expr string) (interface{}, error) {
 					if pe := strings.TrimSpace(parts[1]); pe != "" {
 						if ev, err := i.evalExpr(pe); err == nil {
 							end = toInt(ev)
+							endGiven = true
 						}
 					}
 				}
+				if len(parts) > 2 {
+					if pt := strings.TrimSpace(parts[2]); pt != "" {
+						if tv, err := i.evalExpr(pt); err == nil {
+							step = toInt(tv)
+						}
+					}
+				}
+				if step == 0 {
+					step = 1
+				}
 				switch obj := v.(type) {
 				case []interface{}:
-					if end < 0 || end > len(obj) {
-						end = len(obj)
+					n := len(obj)
+					s, e := sliceBounds(start, end, n, endGiven)
+					var out []interface{}
+					if step > 0 {
+						for k := s; k < e; k += step {
+							out = append(out, obj[k])
+						}
+					} else {
+						for k := s; k > e; k += step {
+							if k >= 0 && k < n {
+								out = append(out, obj[k])
+							}
+						}
 					}
-					if start < 0 {
-						start = 0
-					}
-					if start > len(obj) {
-						start = len(obj)
-					}
-					return obj[start:end], nil
+					return out, nil
 				case []string:
-					if end < 0 || end > len(obj) {
-						end = len(obj)
+					n := len(obj)
+					s, e := sliceBounds(start, end, n, endGiven)
+					var out []string
+					if step > 0 {
+						for k := s; k < e; k += step {
+							out = append(out, obj[k])
+						}
+					} else {
+						for k := s; k > e; k += step {
+							if k >= 0 && k < n {
+								out = append(out, obj[k])
+							}
+						}
 					}
-					if start < 0 {
-						start = 0
-					}
-					if start > len(obj) {
-						start = len(obj)
-					}
-					return obj[start:end], nil
+					return out, nil
 				case string:
-					if end < 0 || end > len(obj) {
-						end = len(obj)
+					n := len(obj)
+					s, e := sliceBounds(start, end, n, endGiven)
+					var out strings.Builder
+					if step > 0 {
+						for k := s; k < e; k += step {
+							out.WriteByte(obj[k])
+						}
+					} else {
+						for k := s; k > e; k += step {
+							if k >= 0 && k < n {
+								out.WriteByte(obj[k])
+							}
+						}
 					}
-					if start < 0 {
-						start = 0
-					}
-					if start > len(obj) {
-						start = len(obj)
-					}
-					return obj[start:end], nil
+					return out.String(), nil
 				}
 			}
 			// 普通索引
@@ -602,21 +950,30 @@ func (i *Interpreter) evalExpr(expr string) (interface{}, error) {
 					if val, ok := obj.Get(key); ok {
 						return val, nil
 					}
-				case []interface{}:
-					n := toInt(iv)
-					if n >= 0 && n < len(obj) {
-						return obj[n], nil
-					}
-				case []string:
-					n := toInt(iv)
-					if n >= 0 && n < len(obj) {
-						return obj[n], nil
-					}
-				case string:
-					n := toInt(iv)
-					if n >= 0 && n < len(obj) {
-						return string(obj[n]), nil
-					}
+			case []interface{}:
+				n := toInt(iv)
+				if n < 0 {
+					n += len(obj)
+				}
+				if n >= 0 && n < len(obj) {
+					return obj[n], nil
+				}
+			case []string:
+				n := toInt(iv)
+				if n < 0 {
+					n += len(obj)
+				}
+				if n >= 0 && n < len(obj) {
+					return obj[n], nil
+				}
+			case string:
+				n := toInt(iv)
+				if n < 0 {
+					n += len(obj)
+				}
+				if n >= 0 && n < len(obj) {
+					return string(obj[n]), nil
+				}
 				}
 			}
 		}
@@ -711,6 +1068,77 @@ func inlineStrCalls(expr string, i *Interpreter) string {
 			rep = strconv.Quote(fmt.Sprintf("%v", val))
 		}
 		expr = expr[:pos] + rep + expr[end+1:]
+	}
+	return expr
+}
+
+// callResultLiteral 把可内联的调用结果转成表达式字面量；不可内联返回 ""
+func callResultLiteral(v interface{}) string {
+	switch x := v.(type) {
+	case int:
+		return strconv.Itoa(x)
+	case float64:
+		return strconv.FormatFloat(x, 'g', -1, 64)
+	case bool:
+		if x {
+			return "True"
+		}
+		return "False"
+	case string:
+		return strconv.Quote(x)
+	default:
+		return ""
+	}
+}
+
+// inlineCalls 把表达式中“参与运算的”调用结果内联为字面量，例如 self.double() * 2 -> 6 * 2
+// 仅当调用不是整个表达式时才内联，避免与纯调用分支冲突（也防止递归）
+func inlineCalls(expr string, i *Interpreter) string {
+	for {
+		lp := strings.Index(expr, "(")
+		if lp < 0 {
+			break
+		}
+		start := lp - 1
+		for start >= 0 {
+			c := expr[start]
+			if c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' {
+				start--
+			} else {
+				break
+			}
+		}
+		start++
+		depth := 1
+		rp := -1
+		for j := lp + 1; j < len(expr); j++ {
+			if expr[j] == '(' {
+				depth++
+			} else if expr[j] == ')' {
+				depth--
+				if depth == 0 {
+					rp = j
+					break
+				}
+			}
+		}
+		if rp < 0 {
+			break
+		}
+		// 整个表达式就是一次调用：交给调用分支处理，不要内联
+		if start == 0 && rp == len(expr)-1 {
+			break
+		}
+		fullCall := expr[start : rp+1]
+		val, err := i.evalExpr(fullCall)
+		if err != nil {
+			break
+		}
+		rep := callResultLiteral(val)
+		if rep == "" {
+			break
+		}
+		expr = expr[:start] + rep + expr[rp+1:]
 	}
 	return expr
 }
@@ -863,7 +1291,19 @@ func tokenize(s string) []string {
 				continue
 			}
 		}
-		if strings.ContainsRune("()+-*/><=!.", rune(c)) {
+		if c == '.' {
+			// 标识符.标识符（如 obj.attr、math.floor）或数字.数字（如 3.7）保持为同一 token
+			prevIsId := cur.Len() > 0
+			nextIsId := i+1 < len(s) && (s[i+1] == '_' || (s[i+1] >= 'a' && s[i+1] <= 'z') || (s[i+1] >= 'A' && s[i+1] <= 'Z') || (s[i+1] >= '0' && s[i+1] <= '9'))
+			if prevIsId && nextIsId {
+				cur.WriteByte(c)
+				continue
+			}
+			flush()
+			tokens = append(tokens, ".")
+			continue
+		}
+		if strings.ContainsRune("()+-*/><=!", rune(c)) {
 			flush()
 			tokens = append(tokens, string(c))
 			continue
@@ -892,6 +1332,25 @@ func resolveToken(tok string, env map[string]interface{}) (interface{}, error) {
 	}
 	if isStringLiteral(tok) {
 		return tok[1 : len(tok)-1], nil
+	}
+	// 点号属性访问：obj.attr
+	if dot := strings.Index(tok, "."); dot > 0 {
+		base := tok[:dot]
+		attr := tok[dot+1:]
+		if v, ok := env[base]; ok {
+			if inst, ok := v.(*Instance); ok {
+				if fv, ok := inst.fields[attr]; ok {
+					return fv, nil
+				}
+				return nil, fmt.Errorf("no attr %s", attr)
+			}
+			if mod, ok := v.(*Module); ok {
+				if cv, ok := mod.consts[attr]; ok {
+					return cv, nil
+				}
+				return nil, fmt.Errorf("no const %s", attr)
+			}
+		}
 	}
 	if v, ok := env[tok]; ok {
 		if _, isFunc := v.(Func); !isFunc {
@@ -972,10 +1431,13 @@ func applyOp(op string, l, r interface{}) (interface{}, error) {
 	case "/":
 		ln, lok := toFloat(l)
 		rn, rok := toFloat(r)
-		if lok && rok && rn != 0 {
-			return ln / rn, nil
+		if !lok || !rok {
+			return 0.0, nil
 		}
-		return 0.0, nil
+		if rn == 0 {
+			rtPanic("division by zero")
+		}
+		return ln / rn, nil
 	}
 	return nil, fmt.Errorf("unknown op %s", op)
 }
@@ -1069,6 +1531,16 @@ func formatValue(v interface{}) string {
 			}
 		}
 		return "[" + strings.Join(items, ", ") + "]"
+	case Tuple:
+		var items []string
+		for _, it := range x {
+			if s, ok := it.(string); ok {
+				items = append(items, "'"+s+"'")
+			} else {
+				items = append(items, formatValue(it))
+			}
+		}
+		return "(" + strings.Join(items, ", ") + ")"
 	case *Dict:
 		var items []string
 		for _, k := range x.keys {
