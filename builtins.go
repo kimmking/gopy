@@ -1433,6 +1433,73 @@ func requireInt(name string, args []Object) (int, error) {
 	return n, nil
 }
 
+// isqrtInt 返回不大于 √n 的最大整数（整数平方根）
+func isqrtInt(n int) int {
+	if n <= 0 {
+		return 0
+	}
+	x := n
+	y := (x + 1) / 2
+	for y < x {
+		x, y = y, (y+n/y)/2
+	}
+	return x
+}
+
+// lcmInt 计算两个整数的最小公倍数（结果非负）
+func lcmInt(a, b int) int {
+	if a == 0 || b == 0 {
+		return 0
+	}
+	aa, bb := a, b
+	if aa < 0 {
+		aa = -aa
+	}
+	if bb < 0 {
+		bb = -bb
+	}
+	g := 0
+	for bb != 0 {
+		aa, bb = bb, aa%bb
+	}
+	g = aa
+	return (intValAbs(a) / g) * intValAbs(b)
+}
+
+func intValAbs(n int) int {
+	if n < 0 {
+		return -n
+	}
+	return n
+}
+
+// mathComb 组合数 C(n, k)
+func mathComb(n, k int) int {
+	if k < 0 || k > n {
+		return 0
+	}
+	if k > n-k {
+		k = n - k
+	}
+	res := 1
+	for i := 1; i <= k; i++ {
+		res = res * (n - k + i) / i
+	}
+	return res
+}
+
+// mathPerm 排列数 P(n, k)
+func mathPerm(n, k int) int {
+	if k < 0 || k > n {
+		return 0
+	}
+	res := 1
+	for i := n - k + 1; i <= n; i++ {
+		res *= i
+	}
+	return res
+}
+
 // flattenArgs 支持 min(1,2,3) 与 min([1,2,3]) 两种写法
 func flattenArgs(args []Object) ([]Object, error) {
 	if len(args) == 1 {
@@ -1702,6 +1769,251 @@ func newMathModule() *Module {
 		}
 		return gcd(a, b), nil
 	})
+	bind("sinh", func(args []Object, kwargs map[string]Object) (Object, error) {
+		return num1("sinh", args, math.Sinh)
+	})
+	bind("cosh", func(args []Object, kwargs map[string]Object) (Object, error) {
+		return num1("cosh", args, math.Cosh)
+	})
+	bind("tanh", func(args []Object, kwargs map[string]Object) (Object, error) {
+		return num1("tanh", args, math.Tanh)
+	})
+	bind("asinh", func(args []Object, kwargs map[string]Object) (Object, error) {
+		return num1("asinh", args, math.Asinh)
+	})
+	bind("acosh", func(args []Object, kwargs map[string]Object) (Object, error) {
+		return num1("acosh", args, math.Acosh)
+	})
+	bind("atanh", func(args []Object, kwargs map[string]Object) (Object, error) {
+		return num1("atanh", args, math.Atanh)
+	})
+	bind("log1p", func(args []Object, kwargs map[string]Object) (Object, error) {
+		return num1("log1p", args, math.Log1p)
+	})
+	bind("expm1", func(args []Object, kwargs map[string]Object) (Object, error) {
+		return num1("expm1", args, math.Expm1)
+	})
+	bind("erf", func(args []Object, kwargs map[string]Object) (Object, error) {
+		return num1("erf", args, math.Erf)
+	})
+	bind("erfc", func(args []Object, kwargs map[string]Object) (Object, error) {
+		return num1("erfc", args, math.Erfc)
+	})
+	bind("gamma", func(args []Object, kwargs map[string]Object) (Object, error) {
+		return num1("gamma", args, math.Gamma)
+	})
+	bind("lgamma", func(args []Object, kwargs map[string]Object) (Object, error) {
+		return num1("lgamma", args, func(f float64) float64 {
+			v, _ := math.Lgamma(f)
+			return v
+		})
+	})
+	bind("isqrt", func(args []Object, kwargs map[string]Object) (Object, error) {
+		n, err := requireInt("isqrt", args)
+		if err != nil {
+			return nil, err
+		}
+		if n < 0 {
+			return nil, newExc("ValueError", "isqrt() argument must be non-negative")
+		}
+		return isqrtInt(n), nil
+	})
+	bind("dist", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) != 2 {
+			return nil, argCountErr("dist", len(args), 2)
+		}
+		p, err := iterate(args[0])
+		if err != nil {
+			return nil, err
+		}
+		q, err := iterate(args[1])
+		if err != nil {
+			return nil, err
+		}
+		if len(p) != len(q) {
+			return nil, newExc("ValueError", "dist() 两个点的维度必须一致")
+		}
+		sum := 0.0
+		for i := range p {
+			a, ok1 := toFloat(p[i])
+			b, ok2 := toFloat(q[i])
+			if !ok1 || !ok2 {
+				return nil, newExc("TypeError", "dist() 需要数值坐标")
+			}
+			d := a - b
+			sum += d * d
+		}
+		return math.Sqrt(sum), nil
+	})
+	bind("comb", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 2 {
+			return nil, argCountErr("comb", len(args), 2)
+		}
+		n, ok1 := intVal(args[0])
+		k, ok2 := intVal(args[1])
+		if !ok1 || !ok2 {
+			return nil, newExc("TypeError", "comb() 需要整数参数")
+		}
+		if n < 0 || k < 0 {
+			return nil, newExc("ValueError", "comb() 不接受负数")
+		}
+		return mathComb(n, k), nil
+	})
+	bind("perm", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 2 {
+			return nil, argCountErr("perm", len(args), 2)
+		}
+		n, ok1 := intVal(args[0])
+		k, ok2 := intVal(args[1])
+		if !ok1 || !ok2 {
+			return nil, newExc("TypeError", "perm() 需要整数参数")
+		}
+		if n < 0 || k < 0 {
+			return nil, newExc("ValueError", "perm() 不接受负数")
+		}
+		if k > n {
+			return 0, nil
+		}
+		return mathPerm(n, k), nil
+	})
+	bind("lcm", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) == 0 {
+			return 1, nil
+		}
+		res := 0
+		first := true
+		for _, a := range args {
+			ai, ok := intVal(a)
+			if !ok {
+				return nil, newExc("TypeError", "lcm() 需要整数参数")
+			}
+			if first {
+				res = ai
+				first = false
+				continue
+			}
+			res = lcmInt(res, ai)
+		}
+		return res, nil
+	})
+	bind("prod", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, argCountErr("prod", len(args), 1)
+		}
+		items, err := iterate(args[0])
+		if err != nil {
+			return nil, err
+		}
+		startObj := Object(1)
+		if v, ok := kwargs["start"]; ok {
+			startObj = v
+		} else if len(args) >= 2 {
+			startObj = args[1]
+		}
+		if i, ok := intVal(startObj); ok {
+			res := i
+			allInt := true
+			for _, it := range items {
+				if j, ok := intVal(it); ok {
+					res *= j
+					continue
+				}
+				allInt = false
+				break
+			}
+			if allInt {
+				return res, nil
+			}
+			acc := float64(res)
+			for _, it := range items {
+				v, ok := numVal(it)
+				if !ok {
+					return nil, newExc("TypeError", "prod() 需要数值")
+				}
+				acc *= v
+			}
+			return acc, nil
+		}
+		acc, ok := numVal(startObj)
+		if !ok {
+			return nil, newExc("TypeError", "prod() 的 start 必须是数值")
+		}
+		for _, it := range items {
+			v, ok := numVal(it)
+			if !ok {
+				return nil, newExc("TypeError", "prod() 需要数值")
+			}
+			acc *= v
+		}
+		return acc, nil
+	})
+	bind("isfinite", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) != 1 {
+			return nil, argCountErr("isfinite", len(args), 1)
+		}
+		f, ok := toFloat(args[0])
+		if !ok {
+			return nil, newExc("TypeError", "isfinite() 需要数值参数")
+		}
+		return !(math.IsInf(f, 0) || math.IsNaN(f)), nil
+	})
+	bind("isinf", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) != 1 {
+			return nil, argCountErr("isinf", len(args), 1)
+		}
+		f, ok := toFloat(args[0])
+		if !ok {
+			return nil, newExc("TypeError", "isinf() 需要数值参数")
+		}
+		return math.IsInf(f, 0), nil
+	})
+	bind("isnan", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) != 1 {
+			return nil, argCountErr("isnan", len(args), 1)
+		}
+		f, ok := toFloat(args[0])
+		if !ok {
+			return nil, newExc("TypeError", "isnan() 需要数值参数")
+		}
+		return math.IsNaN(f), nil
+	})
+	bind("remainder", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 2 {
+			return nil, argCountErr("remainder", len(args), 2)
+		}
+		a, _ := toFloat(args[0])
+		b, _ := toFloat(args[1])
+		return math.Remainder(a, b), nil
+	})
+	bind("nextafter", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 2 {
+			return nil, argCountErr("nextafter", len(args), 2)
+		}
+		a, _ := toFloat(args[0])
+		b, _ := toFloat(args[1])
+		return math.Nextafter(a, b), nil
+	})
+	bind("ulp", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) != 1 {
+			return nil, argCountErr("ulp", len(args), 1)
+		}
+		f, ok := toFloat(args[0])
+		if !ok {
+			return nil, newExc("TypeError", "ulp() 需要数值参数")
+		}
+		return math.Nextafter(f, math.Inf(1)) - f, nil
+	})
+	bind("frexp", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) != 1 {
+			return nil, argCountErr("frexp", len(args), 1)
+		}
+		f, ok := toFloat(args[0])
+		if !ok {
+			return nil, newExc("TypeError", "frexp() 需要数值参数")
+		}
+		m, exp := math.Frexp(f)
+		return &Tuple{Items: []Object{m, exp}}, nil
+	})
 	m.Attrs["pi"] = math.Pi
 	m.Attrs["e"] = math.E
 	m.Attrs["tau"] = math.Pi * 2
@@ -1742,6 +2054,115 @@ func newOsModule() *Module {
 	})
 	bind("getpid", func(args []Object, kwargs map[string]Object) (Object, error) {
 		return os.Getpid(), nil
+	})
+	bind("getenv", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, argCountErr("getenv", len(args), 1)
+		}
+		key, ok := args[0].(string)
+		if !ok {
+			return nil, newExc("TypeError", "getenv() 需要字符串参数")
+		}
+		if v, ok := os.LookupEnv(key); ok {
+			return v, nil
+		}
+		return None, nil
+	})
+	bind("environ", func(args []Object, kwargs map[string]Object) (Object, error) {
+		return envDict(), nil
+	})
+	m.Attrs["environ"] = envDict()
+	bind("mkdir", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, argCountErr("mkdir", len(args), 1)
+		}
+		path, ok := args[0].(string)
+		if !ok {
+			return nil, newExc("TypeError", "mkdir() 需要字符串参数")
+		}
+		if err := os.Mkdir(path, 0o755); err != nil {
+			return nil, newExc("OSError", "%s", err.Error())
+		}
+		return None, nil
+	})
+	bind("makedirs", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, argCountErr("makedirs", len(args), 1)
+		}
+		path, ok := args[0].(string)
+		if !ok {
+			return nil, newExc("TypeError", "makedirs() 需要字符串参数")
+		}
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			return nil, newExc("OSError", "%s", err.Error())
+		}
+		return None, nil
+	})
+	bind("remove", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, argCountErr("remove", len(args), 1)
+		}
+		path, ok := args[0].(string)
+		if !ok {
+			return nil, newExc("TypeError", "remove() 需要字符串参数")
+		}
+		if err := os.Remove(path); err != nil {
+			return nil, newExc("OSError", "%s", err.Error())
+		}
+		return None, nil
+	})
+	bind("unlink", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, argCountErr("unlink", len(args), 1)
+		}
+		path, ok := args[0].(string)
+		if !ok {
+			return nil, newExc("TypeError", "unlink() 需要字符串参数")
+		}
+		if err := os.Remove(path); err != nil {
+			return nil, newExc("OSError", "%s", err.Error())
+		}
+		return None, nil
+	})
+	bind("rmdir", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, argCountErr("rmdir", len(args), 1)
+		}
+		path, ok := args[0].(string)
+		if !ok {
+			return nil, newExc("TypeError", "rmdir() 需要字符串参数")
+		}
+		if err := os.Remove(path); err != nil {
+			return nil, newExc("OSError", "%s", err.Error())
+		}
+		return None, nil
+	})
+	bind("rename", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 2 {
+			return nil, argCountErr("rename", len(args), 2)
+		}
+		src, ok1 := args[0].(string)
+		dst, ok2 := args[1].(string)
+		if !ok1 || !ok2 {
+			return nil, newExc("TypeError", "rename() 需要字符串参数")
+		}
+		if err := os.Rename(src, dst); err != nil {
+			return nil, newExc("OSError", "%s", err.Error())
+		}
+		return None, nil
+	})
+	bind("chdir", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, argCountErr("chdir", len(args), 1)
+		}
+		path, ok := args[0].(string)
+		if !ok {
+			return nil, newExc("TypeError", "chdir() 需要字符串参数")
+		}
+		if err := os.Chdir(path); err != nil {
+			return nil, newExc("OSError", "%s", err.Error())
+		}
+		return None, nil
 	})
 	m.Attrs["name"] = "posix"
 	m.Attrs["sep"] = "/"
@@ -1800,8 +2221,107 @@ func newOsModule() *Module {
 		base := strings.TrimSuffix(pathArg(args), ext)
 		return &Tuple{Items: []Object{base, ext}}, nil
 	})
+	pbind("split", func(args []Object, kwargs map[string]Object) (Object, error) {
+		dir, file := filepath.Split(pathArg(args))
+		if len(dir) > 1 {
+			dir = strings.TrimRight(dir, "/")
+		}
+		return &Tuple{Items: []Object{dir, file}}, nil
+	})
+	pbind("normpath", func(args []Object, kwargs map[string]Object) (Object, error) {
+		return filepath.Clean(pathArg(args)), nil
+	})
+	pbind("realpath", func(args []Object, kwargs map[string]Object) (Object, error) {
+		abs, err := filepath.Abs(pathArg(args))
+		if err != nil {
+			return "", nil
+		}
+		return filepath.Clean(abs), nil
+	})
+	pbind("isabs", func(args []Object, kwargs map[string]Object) (Object, error) {
+		return filepath.IsAbs(pathArg(args)), nil
+	})
+	pbind("relpath", func(args []Object, kwargs map[string]Object) (Object, error) {
+		path := pathArg(args)
+		base := "."
+		if len(args) >= 2 {
+			if s, ok := args[1].(string); ok {
+				base = s
+			}
+		}
+		rel, err := filepath.Rel(base, path)
+		if err != nil {
+			return path, nil
+		}
+		return rel, nil
+	})
+	pbind("commonpath", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, argCountErr("commonpath", len(args), 1)
+		}
+		raw, err := iterate(args[0])
+		if err != nil {
+			return nil, newExc("TypeError", "commonpath() 需要路径列表")
+		}
+		paths := make([]string, 0, len(raw))
+		for _, a := range raw {
+			s, ok := a.(string)
+			if !ok {
+				return nil, newExc("TypeError", "commonpath() 需要字符串路径")
+			}
+			paths = append(paths, s)
+		}
+		if len(paths) == 0 {
+			return nil, newExc("ValueError", "commonpath() 需要至少一个路径")
+		}
+		common, err := filepath.Rel(filepath.Dir(paths[0]), paths[0])
+		if err != nil {
+			return "", nil
+		}
+		common = filepath.Clean(common)
+		for _, p := range paths[1:] {
+			cp, err := filepath.Rel(filepath.Dir(p), p)
+			if err != nil {
+				return "", nil
+			}
+			common = commonPrefix(common, filepath.Clean(cp))
+		}
+		if common == "." {
+			return filepath.Dir(paths[0]), nil
+		}
+		return filepath.Join(filepath.Dir(paths[0]), common), nil
+	})
+	pbind("getsize", func(args []Object, kwargs map[string]Object) (Object, error) {
+		fi, err := os.Stat(pathArg(args))
+		if err != nil {
+			return nil, newExc("FileNotFoundError", "No such file or directory: '%s'", pathArg(args))
+		}
+		return int(fi.Size()), nil
+	})
 	m.Attrs["path"] = p
 	return m
+}
+
+// commonPrefix 返回两个以 / 分隔路径的公共前缀（按段比较）
+func commonPrefix(a, b string) string {
+	as := strings.Split(a, "/")
+	bs := strings.Split(b, "/")
+	n := 0
+	for n < len(as) && n < len(bs) && as[n] == bs[n] {
+		n++
+	}
+	return strings.Join(as[:n], "/")
+}
+
+// envDict 由进程环境变量构造一个字典
+func envDict() *Dict {
+	d := NewDict()
+	for _, kv := range os.Environ() {
+		if idx := strings.IndexByte(kv, '='); idx >= 0 {
+			d.Set(kv[:idx], kv[idx+1:])
+		}
+	}
+	return d
 }
 
 func newSysModule(argv []Object) *Module {
