@@ -1,0 +1,1856 @@
+package main
+
+import (
+	"bufio"
+	"fmt"
+	"math"
+	"os"
+	"path/filepath"
+	"runtime"
+	"sort"
+	"strconv"
+	"strings"
+	"unicode"
+)
+
+// ============ 内建类型方法 ============
+
+type MethodFn func(recv Object, args []Object, kwargs map[string]Object) (Object, error)
+
+func callBuiltinMethod(recv Object, name string, args []Object, kwargs map[string]Object) (Object, error) {
+	switch typeName(recv) {
+	case "str":
+		if fn, ok := strMethods[name]; ok {
+			return fn(recv, args, kwargs)
+		}
+	case "list":
+		if fn, ok := listMethods[name]; ok {
+			return fn(recv, args, kwargs)
+		}
+	case "dict":
+		if fn, ok := dictMethods[name]; ok {
+			return fn(recv, args, kwargs)
+		}
+	case "tuple":
+		if fn, ok := tupleMethods[name]; ok {
+			return fn(recv, args, kwargs)
+		}
+	case "set":
+		if fn, ok := setMethods[name]; ok {
+			return fn(recv, args, kwargs)
+		}
+	}
+	return nil, newExc("AttributeError", "'%s' 对象没有属性 '%s'", typeName(recv), name)
+}
+
+func kwBool(kwargs map[string]Object, key string) bool {
+	if v, ok := kwargs[key]; ok {
+		return truthy(v)
+	}
+	return false
+}
+
+func argCountErr(name string, got, want int) error {
+	return newExc("TypeError", "%s() 需要 %d 个参数，实际传入 %d 个", name, want, got)
+}
+
+// ---------- 字符串方法 ----------
+
+var strMethods = map[string]MethodFn{
+	"upper": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		return strings.ToUpper(recv.(string)), nil
+	},
+	"lower": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		return strings.ToLower(recv.(string)), nil
+	},
+	"capitalize": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		s := recv.(string)
+		if s == "" {
+			return "", nil
+		}
+		rs := []rune(s)
+		return string(unicode.ToUpper(rs[0])) + strings.ToLower(string(rs[1:])), nil
+	},
+	"title": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		return titleCase(recv.(string)), nil
+	},
+	"swapcase": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		rs := []rune(recv.(string))
+		for i, r := range rs {
+			if unicode.IsUpper(r) {
+				rs[i] = unicode.ToLower(r)
+			} else if unicode.IsLower(r) {
+				rs[i] = unicode.ToUpper(r)
+			}
+		}
+		return string(rs), nil
+	},
+	"strip": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		s := recv.(string)
+		if len(args) > 0 {
+			if cut, ok := args[0].(string); ok {
+				return strings.Trim(s, cut), nil
+			}
+		}
+		return strings.TrimSpace(s), nil
+	},
+	"lstrip": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		s := recv.(string)
+		if len(args) > 0 {
+			if cut, ok := args[0].(string); ok {
+				return strings.TrimLeft(s, cut), nil
+			}
+		}
+		return strings.TrimLeft(s, " \t\n\r\f\v"), nil
+	},
+	"rstrip": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		s := recv.(string)
+		if len(args) > 0 {
+			if cut, ok := args[0].(string); ok {
+				return strings.TrimRight(s, cut), nil
+			}
+		}
+		return strings.TrimRight(s, " \t\n\r\f\v"), nil
+	},
+	"split": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		s := recv.(string)
+		var parts []string
+		if len(args) == 0 {
+			parts = strings.Fields(s)
+		} else {
+			sep, ok := args[0].(string)
+			if !ok {
+				return nil, newExc("TypeError", "split() 的分隔符必须是字符串")
+			}
+			if sep == "" {
+				return nil, newExc("ValueError", "empty separator")
+			}
+			parts = strings.Split(s, sep)
+		}
+		out := make([]Object, len(parts))
+		for i, p := range parts {
+			out[i] = p
+		}
+		return &List{Items: out}, nil
+	},
+	"rsplit": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		s := recv.(string)
+		var parts []string
+		if len(args) == 0 {
+			parts = strings.Fields(s)
+		} else {
+			sep, ok := args[0].(string)
+			if !ok {
+				return nil, newExc("TypeError", "rsplit() 的分隔符必须是字符串")
+			}
+			parts = strings.Split(s, sep)
+		}
+		out := make([]Object, len(parts))
+		for i, p := range parts {
+			out[i] = p
+		}
+		return &List{Items: out}, nil
+	},
+	"splitlines": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		parts := strings.Split(recv.(string), "\n")
+		out := make([]Object, len(parts))
+		for i, p := range parts {
+			out[i] = p
+		}
+		return &List{Items: out}, nil
+	},
+	"join": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) != 1 {
+			return nil, argCountErr("join", len(args), 1)
+		}
+		items, err := iterate(args[0])
+		if err != nil {
+			return nil, err
+		}
+		parts := make([]string, len(items))
+		for i, it := range items {
+			s, ok := it.(string)
+			if !ok {
+				return nil, newExc("TypeError", "join() 的元素必须是字符串，实际为 '%s'", typeName(it))
+			}
+			parts[i] = s
+		}
+		return strings.Join(parts, recv.(string)), nil
+	},
+	"startswith": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, argCountErr("startswith", len(args), 1)
+		}
+		p, ok := args[0].(string)
+		if !ok {
+			return nil, newExc("TypeError", "startswith() 需要字符串参数")
+		}
+		return strings.HasPrefix(recv.(string), p), nil
+	},
+	"endswith": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, argCountErr("endswith", len(args), 1)
+		}
+		p, ok := args[0].(string)
+		if !ok {
+			return nil, newExc("TypeError", "endswith() 需要字符串参数")
+		}
+		return strings.HasSuffix(recv.(string), p), nil
+	},
+	"find": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, argCountErr("find", len(args), 1)
+		}
+		sub, ok := args[0].(string)
+		if !ok {
+			return nil, newExc("TypeError", "find() 需要字符串参数")
+		}
+		return strings.Index(recv.(string), sub), nil
+	},
+	"rfind": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, argCountErr("rfind", len(args), 1)
+		}
+		sub, ok := args[0].(string)
+		if !ok {
+			return nil, newExc("TypeError", "rfind() 需要字符串参数")
+		}
+		return strings.LastIndex(recv.(string), sub), nil
+	},
+	"index": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, argCountErr("index", len(args), 1)
+		}
+		sub, ok := args[0].(string)
+		if !ok {
+			return nil, newExc("TypeError", "index() 需要字符串参数")
+		}
+		pos := strings.Index(recv.(string), sub)
+		if pos < 0 {
+			return nil, newExc("ValueError", "substring not found")
+		}
+		return pos, nil
+	},
+	"count": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, argCountErr("count", len(args), 1)
+		}
+		sub, ok := args[0].(string)
+		if !ok {
+			return nil, newExc("TypeError", "count() 需要字符串参数")
+		}
+		return strings.Count(recv.(string), sub), nil
+	},
+	"replace": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 2 {
+			return nil, argCountErr("replace", len(args), 2)
+		}
+		oldS, ok1 := args[0].(string)
+		newS, ok2 := args[1].(string)
+		if !ok1 || !ok2 {
+			return nil, newExc("TypeError", "replace() 需要字符串参数")
+		}
+		n := -1
+		if len(args) >= 3 {
+			if v, ok := intVal(args[2]); ok {
+				n = v
+			}
+		}
+		return strings.Replace(recv.(string), oldS, newS, n), nil
+	},
+	"isdigit": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		s := recv.(string)
+		if s == "" {
+			return false, nil
+		}
+		for _, r := range s {
+			if !unicode.IsDigit(r) {
+				return false, nil
+			}
+		}
+		return true, nil
+	},
+	"isalpha": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		s := recv.(string)
+		if s == "" {
+			return false, nil
+		}
+		for _, r := range s {
+			if !unicode.IsLetter(r) {
+				return false, nil
+			}
+		}
+		return true, nil
+	},
+	"isalnum": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		s := recv.(string)
+		if s == "" {
+			return false, nil
+		}
+		for _, r := range s {
+			if !unicode.IsLetter(r) && !unicode.IsDigit(r) {
+				return false, nil
+			}
+		}
+		return true, nil
+	},
+	"isspace": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		s := recv.(string)
+		if s == "" {
+			return false, nil
+		}
+		for _, r := range s {
+			if !unicode.IsSpace(r) {
+				return false, nil
+			}
+		}
+		return true, nil
+	},
+	"isupper": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		s := recv.(string)
+		has := false
+		for _, r := range s {
+			if unicode.IsLetter(r) {
+				has = true
+				if !unicode.IsUpper(r) {
+					return false, nil
+				}
+			}
+		}
+		return has, nil
+	},
+	"islower": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		s := recv.(string)
+		has := false
+		for _, r := range s {
+			if unicode.IsLetter(r) {
+				has = true
+				if !unicode.IsLower(r) {
+					return false, nil
+				}
+			}
+		}
+		return has, nil
+	},
+	"ljust": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, argCountErr("ljust", len(args), 1)
+		}
+		w, ok := intVal(args[0])
+		if !ok {
+			return nil, newExc("TypeError", "ljust() 需要整数宽度")
+		}
+		return padString(recv.(string), w, false), nil
+	},
+	"rjust": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, argCountErr("rjust", len(args), 1)
+		}
+		w, ok := intVal(args[0])
+		if !ok {
+			return nil, newExc("TypeError", "rjust() 需要整数宽度")
+		}
+		return padString(recv.(string), w, true), nil
+	},
+	"center": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, argCountErr("center", len(args), 1)
+		}
+		w, ok := intVal(args[0])
+		if !ok {
+			return nil, newExc("TypeError", "center() 需要整数宽度")
+		}
+		s := recv.(string)
+		n := len([]rune(s))
+		if w <= n {
+			return s, nil
+		}
+		total := w - n
+		left := total / 2
+		return strings.Repeat(" ", left) + s + strings.Repeat(" ", total-left), nil
+	},
+	"zfill": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, argCountErr("zfill", len(args), 1)
+		}
+		w, ok := intVal(args[0])
+		if !ok {
+			return nil, newExc("TypeError", "zfill() 需要整数宽度")
+		}
+		s := recv.(string)
+		neg := strings.HasPrefix(s, "-")
+		if neg {
+			s = s[1:]
+		}
+		if w <= len(s) {
+			if neg {
+				return "-" + s, nil
+			}
+			return s, nil
+		}
+		out := strings.Repeat("0", w-len(s)) + s
+		if neg {
+			return "-" + out, nil
+		}
+		return out, nil
+	},
+	"format": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		return nil, newExc("NotImplementedError", "str.format 尚未实现，请使用 f-string")
+	},
+}
+
+func padString(s string, width int, left bool) string {
+	n := len([]rune(s))
+	if width <= n {
+		return s
+	}
+	pad := strings.Repeat(" ", width-n)
+	if left {
+		return pad + s
+	}
+	return s + pad
+}
+
+// titleCase 模拟 Python 的 str.title
+func titleCase(s string) string {
+	var out strings.Builder
+	upper := true
+	for _, r := range s {
+		if unicode.IsSpace(r) {
+			out.WriteRune(r)
+			upper = true
+		} else if upper {
+			out.WriteRune(unicode.ToUpper(r))
+			upper = false
+		} else {
+			out.WriteRune(unicode.ToLower(r))
+		}
+	}
+	return out.String()
+}
+
+// ---------- 列表方法 ----------
+
+var listMethods = map[string]MethodFn{
+	"append": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) != 1 {
+			return nil, argCountErr("append", len(args), 1)
+		}
+		l := recv.(*List)
+		l.Items = append(l.Items, args[0])
+		return None, nil
+	},
+	"extend": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) != 1 {
+			return nil, argCountErr("extend", len(args), 1)
+		}
+		items, err := iterate(args[0])
+		if err != nil {
+			return nil, err
+		}
+		l := recv.(*List)
+		l.Items = append(l.Items, items...)
+		return None, nil
+	},
+	"insert": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) != 2 {
+			return nil, argCountErr("insert", len(args), 2)
+		}
+		idx, ok := intVal(args[0])
+		if !ok {
+			return nil, newExc("TypeError", "insert() 的下标必须是整数")
+		}
+		l := recv.(*List)
+		n := len(l.Items)
+		if idx < 0 {
+			idx += n
+			if idx < 0 {
+				idx = 0
+			}
+		}
+		if idx > n {
+			idx = n
+		}
+		out := make([]Object, 0, n+1)
+		out = append(out, l.Items[:idx]...)
+		out = append(out, args[1])
+		out = append(out, l.Items[idx:]...)
+		l.Items = out
+		return None, nil
+	},
+	"remove": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) != 1 {
+			return nil, argCountErr("remove", len(args), 1)
+		}
+		l := recv.(*List)
+		for i, it := range l.Items {
+			if objectsEqual(it, args[0]) {
+				l.Items = append(l.Items[:i], l.Items[i+1:]...)
+				return None, nil
+			}
+		}
+		return nil, newExc("ValueError", "list.remove(x): x not in list")
+	},
+	"pop": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		l := recv.(*List)
+		if len(l.Items) == 0 {
+			return nil, newExc("IndexError", "pop from empty list")
+		}
+		idx := len(l.Items) - 1
+		if len(args) > 0 {
+			v, ok := intVal(args[0])
+			if !ok {
+				return nil, newExc("TypeError", "pop() 的下标必须是整数")
+			}
+			idx = v
+			if idx < 0 {
+				idx += len(l.Items)
+			}
+			if idx < 0 || idx >= len(l.Items) {
+				return nil, newExc("IndexError", "pop index out of range")
+			}
+		}
+		out := l.Items[idx]
+		l.Items = append(l.Items[:idx], l.Items[idx+1:]...)
+		return out, nil
+	},
+	"clear": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		recv.(*List).Items = nil
+		return None, nil
+	},
+	"index": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, argCountErr("index", len(args), 1)
+		}
+		for i, it := range recv.(*List).Items {
+			if objectsEqual(it, args[0]) {
+				return i, nil
+			}
+		}
+		return nil, newExc("ValueError", "%s is not in list", Repr(args[0]))
+	},
+	"count": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, argCountErr("count", len(args), 1)
+		}
+		n := 0
+		for _, it := range recv.(*List).Items {
+			if objectsEqual(it, args[0]) {
+				n++
+			}
+		}
+		return n, nil
+	},
+	"sort": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		l := recv.(*List)
+		reverse := kwBool(kwargs, "reverse")
+		keyFn, hasKey := kwargs["key"]
+		if hasKey {
+			decorated := make([]Object, 0, len(l.Items))
+			for i, it := range l.Items {
+				k, err := callObjectRef(keyFn, []Object{it}, nil)
+				if err != nil {
+					return nil, err
+				}
+				decorated = append(decorated, &Tuple{Items: []Object{k, i, it}})
+			}
+			sortedDec := sortObjectsByKey(decorated, reverse)
+			out := make([]Object, len(sortedDec))
+			for i, d := range sortedDec {
+				out[i] = d.(*Tuple).Items[2]
+			}
+			l.Items = out
+			return None, nil
+		}
+		l.Items = sortObjects(l.Items, reverse)
+		return None, nil
+	},
+	"reverse": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		l := recv.(*List)
+		for i, j := 0, len(l.Items)-1; i < j; i, j = i+1, j-1 {
+			l.Items[i], l.Items[j] = l.Items[j], l.Items[i]
+		}
+		return None, nil
+	},
+	"copy": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		l := recv.(*List)
+		out := make([]Object, len(l.Items))
+		copy(out, l.Items)
+		return &List{Items: out}, nil
+	},
+}
+
+func sortObjectsByKey(items []Object, reverse bool) []Object {
+	out := make([]Object, len(items))
+	copy(out, items)
+	sort.SliceStable(out, func(i, j int) bool {
+		a := out[i].(*Tuple).Items[0]
+		b := out[j].(*Tuple).Items[0]
+		c, ok := compareValues(a, b)
+		if !ok {
+			ra, rb := Repr(a), Repr(b)
+			if reverse {
+				return ra > rb
+			}
+			return ra < rb
+		}
+		if reverse {
+			return c > 0
+		}
+		return c < 0
+	})
+	return out
+}
+
+// ---------- 字典方法 ----------
+
+var dictMethods = map[string]MethodFn{
+	"keys": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		d := recv.(*Dict)
+		out := make([]Object, 0, d.Len())
+		out = append(out, d.Keys...)
+		return &List{Items: out}, nil
+	},
+	"values": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		d := recv.(*Dict)
+		out := make([]Object, 0, d.Len())
+		for _, k := range d.Keys {
+			out = append(out, d.Vals[keyOf(k)])
+		}
+		return &List{Items: out}, nil
+	},
+	"items": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		d := recv.(*Dict)
+		out := make([]Object, 0, d.Len())
+		for _, k := range d.Keys {
+			out = append(out, &Tuple{Items: []Object{k, d.Vals[keyOf(k)]}})
+		}
+		return &List{Items: out}, nil
+	},
+	"get": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, argCountErr("get", len(args), 1)
+		}
+		if v, ok := recv.(*Dict).Get(args[0]); ok {
+			return v, nil
+		}
+		if len(args) >= 2 {
+			return args[1], nil
+		}
+		return None, nil
+	},
+	"pop": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, argCountErr("pop", len(args), 1)
+		}
+		d := recv.(*Dict)
+		if v, ok := d.Get(args[0]); ok {
+			d.Delete(args[0])
+			return v, nil
+		}
+		if len(args) >= 2 {
+			return args[1], nil
+		}
+		return nil, newExc("KeyError", "%s", Repr(args[0]))
+	},
+	"setdefault": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, argCountErr("setdefault", len(args), 1)
+		}
+		d := recv.(*Dict)
+		if v, ok := d.Get(args[0]); ok {
+			return v, nil
+		}
+		def := None
+		if len(args) >= 2 {
+			def = args[1]
+		}
+		d.Set(args[0], def)
+		return def, nil
+	},
+	"update": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		d := recv.(*Dict)
+		for _, a := range args {
+			other, ok := a.(*Dict)
+			if !ok {
+				return nil, newExc("TypeError", "update() 需要字典参数")
+			}
+			for _, k := range other.Keys {
+				d.Set(k, other.Vals[keyOf(k)])
+			}
+		}
+		for name, v := range kwargs {
+			d.Set(name, v)
+		}
+		return None, nil
+	},
+	"clear": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		d := recv.(*Dict)
+		d.Keys = nil
+		d.Vals = map[string]Object{}
+		return None, nil
+	},
+	"copy": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		d := recv.(*Dict)
+		out := NewDict()
+		for _, k := range d.Keys {
+			out.Set(k, d.Vals[keyOf(k)])
+		}
+		return out, nil
+	},
+}
+
+// ---------- 元组方法 ----------
+
+var tupleMethods = map[string]MethodFn{
+	"count": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, argCountErr("count", len(args), 1)
+		}
+		n := 0
+		for _, it := range recv.(*Tuple).Items {
+			if objectsEqual(it, args[0]) {
+				n++
+			}
+		}
+		return n, nil
+	},
+	"index": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, argCountErr("index", len(args), 1)
+		}
+		for i, it := range recv.(*Tuple).Items {
+			if objectsEqual(it, args[0]) {
+				return i, nil
+			}
+		}
+		return nil, newExc("ValueError", "tuple.index(x): x not in tuple")
+	},
+}
+
+// ---------- 集合方法 ----------
+
+var setMethods = map[string]MethodFn{
+	"add": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) != 1 {
+			return nil, argCountErr("add", len(args), 1)
+		}
+		recv.(*Set).Add(args[0])
+		return None, nil
+	},
+	"remove": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) != 1 {
+			return nil, argCountErr("remove", len(args), 1)
+		}
+		s := recv.(*Set)
+		if !s.Has(args[0]) {
+			return nil, newExc("KeyError", "%s", Repr(args[0]))
+		}
+		s.Remove(args[0])
+		return None, nil
+	},
+	"discard": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) != 1 {
+			return nil, argCountErr("discard", len(args), 1)
+		}
+		recv.(*Set).Remove(args[0])
+		return None, nil
+	},
+	"clear": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		s := recv.(*Set)
+		s.Vals = map[string]Object{}
+		s.Order = nil
+		return None, nil
+	},
+	"copy": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		out := NewSet()
+		for _, it := range recv.(*Set).Order {
+			out.Add(it)
+		}
+		return out, nil
+	},
+	"union": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		out := NewSet()
+		for _, it := range recv.(*Set).Order {
+			out.Add(it)
+		}
+		for _, a := range args {
+			items, err := iterate(a)
+			if err != nil {
+				return nil, err
+			}
+			for _, it := range items {
+				out.Add(it)
+			}
+		}
+		return out, nil
+	},
+	"intersection": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		out := NewSet()
+		for _, it := range recv.(*Set).Order {
+			all := true
+			for _, a := range args {
+				s, ok := a.(*Set)
+				if !ok || !s.Has(it) {
+					all = false
+					break
+				}
+			}
+			if all {
+				out.Add(it)
+			}
+		}
+		return out, nil
+	},
+	"difference": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		out := NewSet()
+		for _, it := range recv.(*Set).Order {
+			found := false
+			for _, a := range args {
+				s, ok := a.(*Set)
+				if ok && s.Has(it) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				out.Add(it)
+			}
+		}
+		return out, nil
+	},
+}
+
+// ============ 内置函数 ============
+
+var builtinFuncs = map[string]BuiltinFn{
+	"print": func(args []Object, kwargs map[string]Object) (Object, error) {
+		sep := " "
+		if v, ok := kwargs["sep"]; ok {
+			sep = Str(v)
+		}
+		end := "\n"
+		if v, ok := kwargs["end"]; ok {
+			end = Str(v)
+		}
+		parts := make([]string, len(args))
+		for i, a := range args {
+			parts[i] = Str(a)
+		}
+		fmt.Print(strings.Join(parts, sep) + end)
+		return None, nil
+	},
+	"len": func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) != 1 {
+			return nil, argCountErr("len", len(args), 1)
+		}
+		switch x := args[0].(type) {
+		case *List:
+			return len(x.Items), nil
+		case *Tuple:
+			return len(x.Items), nil
+		case *Dict:
+			return x.Len(), nil
+		case *Set:
+			return x.Len(), nil
+		case *Range:
+			return x.Len(), nil
+		case string:
+			return len([]rune(x)), nil
+		}
+		return nil, newExc("TypeError", "'%s' 对象没有长度", typeName(args[0]))
+	},
+	"str": func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) == 0 {
+			return "", nil
+		}
+		return Str(args[0]), nil
+	},
+	"repr": func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) == 0 {
+			return "", nil
+		}
+		return Repr(args[0]), nil
+	},
+	"type": func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) != 1 {
+			return nil, argCountErr("type", len(args), 1)
+		}
+		return &PyType{Name: typeName(args[0])}, nil
+	},
+	"int": func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) == 0 {
+			return 0, nil
+		}
+		v := args[0]
+		base := 10
+		if len(args) >= 2 {
+			b, ok := intVal(args[1])
+			if !ok {
+				return nil, newExc("TypeError", "int() 的进制必须是整数")
+			}
+			base = b
+		}
+		switch x := v.(type) {
+		case int:
+			return x, nil
+		case bool:
+			if x {
+				return 1, nil
+			}
+			return 0, nil
+		case float64:
+			if math.IsNaN(x) || math.IsInf(x, 0) {
+				return nil, newExc("ValueError", "cannot convert float %s to integer", formatFloat(x))
+			}
+			return int(x), nil
+		case string:
+			s := strings.TrimSpace(x)
+			if n, err := strconv.ParseInt(s, base, 64); err == nil {
+				return int(n), nil
+			}
+			if f, err := strconv.ParseFloat(s, 64); err == nil && base == 10 {
+				return int(f), nil
+			}
+			return nil, newExc("ValueError", "invalid literal for int() with base %d: %s", base, Repr(x))
+		}
+		return nil, newExc("TypeError", "int() 参数无法转换为整数: '%s'", typeName(v))
+	},
+	"float": func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) == 0 {
+			return 0.0, nil
+		}
+		if f, ok := toFloat(args[0]); ok {
+			return f, nil
+		}
+		return nil, newExc("ValueError", "could not convert to float: %s", Repr(args[0]))
+	},
+	"bool": func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) == 0 {
+			return false, nil
+		}
+		return truthy(args[0]), nil
+	},
+	"list": func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) == 0 {
+			return &List{}, nil
+		}
+		items, err := iterate(args[0])
+		if err != nil {
+			return nil, err
+		}
+		out := make([]Object, len(items))
+		copy(out, items)
+		return &List{Items: out}, nil
+	},
+	"tuple": func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) == 0 {
+			return &Tuple{}, nil
+		}
+		items, err := iterate(args[0])
+		if err != nil {
+			return nil, err
+		}
+		out := make([]Object, len(items))
+		copy(out, items)
+		return &Tuple{Items: out}, nil
+	},
+	"set": func(args []Object, kwargs map[string]Object) (Object, error) {
+		out := NewSet()
+		if len(args) == 0 {
+			return out, nil
+		}
+		items, err := iterate(args[0])
+		if err != nil {
+			return nil, err
+		}
+		for _, it := range items {
+			out.Add(it)
+		}
+		return out, nil
+	},
+	"dict": func(args []Object, kwargs map[string]Object) (Object, error) {
+		out := NewDict()
+		for name, v := range kwargs {
+			out.Set(name, v)
+		}
+		for _, a := range args {
+			d, ok := a.(*Dict)
+			if !ok {
+				items, err := iterate(a)
+				if err != nil {
+					return nil, err
+				}
+				for _, it := range items {
+					p, ok := it.(*Tuple)
+					if !ok || len(p.Items) != 2 {
+						return nil, newExc("ValueError", "dict() 的元素必须是 (key, value) 二元组")
+					}
+					out.Set(p.Items[0], p.Items[1])
+				}
+				continue
+			}
+			for _, k := range d.Keys {
+				out.Set(k, d.Vals[keyOf(k)])
+			}
+		}
+		return out, nil
+	},
+	"range": func(args []Object, kwargs map[string]Object) (Object, error) {
+		start, stop, step := 0, 0, 1
+		switch len(args) {
+		case 1:
+			v, ok := intVal(args[0])
+			if !ok {
+				return nil, newExc("TypeError", "range() 需要整数参数")
+			}
+			stop = v
+		case 2, 3:
+			v, ok := intVal(args[0])
+			if !ok {
+				return nil, newExc("TypeError", "range() 需要整数参数")
+			}
+			start = v
+			v2, ok2 := intVal(args[1])
+			if !ok2 {
+				return nil, newExc("TypeError", "range() 需要整数参数")
+			}
+			stop = v2
+			if len(args) == 3 {
+				v3, ok3 := intVal(args[2])
+				if !ok3 {
+					return nil, newExc("TypeError", "range() 的步长必须是整数")
+				}
+				step = v3
+			}
+		default:
+			return nil, newExc("TypeError", "range() 需要 1 到 3 个参数")
+		}
+		if step == 0 {
+			return nil, newExc("ValueError", "range() arg 3 must not be zero")
+		}
+		return &Range{Start: start, Stop: stop, Step: step}, nil
+	},
+	"abs": func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) != 1 {
+			return nil, argCountErr("abs", len(args), 1)
+		}
+		if i, ok := intVal(args[0]); ok {
+			if i < 0 {
+				return -i, nil
+			}
+			return i, nil
+		}
+		if f, ok := numVal(args[0]); ok {
+			return math.Abs(f), nil
+		}
+		return nil, newExc("TypeError", "abs() 需要数值参数")
+	},
+	"round": func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, argCountErr("round", len(args), 1)
+		}
+		f, ok := numVal(args[0])
+		if !ok {
+			return nil, newExc("TypeError", "round() 需要数值参数")
+		}
+		ndigits := 0
+		if len(args) >= 2 {
+			n, ok := intVal(args[1])
+			if !ok {
+				return nil, newExc("TypeError", "round() 的精度必须是整数")
+			}
+			ndigits = n
+		} else if i, isInt := args[0].(int); isInt {
+			return i, nil
+		}
+		shift := math.Pow(10, float64(ndigits))
+		return math.Round(f*shift) / shift, nil
+	},
+	"pow": func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 2 {
+			return nil, argCountErr("pow", len(args), 2)
+		}
+		return binaryOp("**", args[0], args[1])
+	},
+	"divmod": func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) != 2 {
+			return nil, argCountErr("divmod", len(args), 2)
+		}
+		q, err := binaryOp("//", args[0], args[1])
+		if err != nil {
+			return nil, err
+		}
+		r, err := binaryOp("%", args[0], args[1])
+		if err != nil {
+			return nil, err
+		}
+		return &Tuple{Items: []Object{q, r}}, nil
+	},
+	"min": func(args []Object, kwargs map[string]Object) (Object, error) {
+		items, err := flattenArgs(args)
+		if err != nil {
+			return nil, err
+		}
+		if len(items) == 0 {
+			return nil, newExc("ValueError", "min() 参数为空")
+		}
+		return minMax(items, false, kwargs)
+	},
+	"max": func(args []Object, kwargs map[string]Object) (Object, error) {
+		items, err := flattenArgs(args)
+		if err != nil {
+			return nil, err
+		}
+		if len(items) == 0 {
+			return nil, newExc("ValueError", "max() 参数为空")
+		}
+		return minMax(items, true, kwargs)
+	},
+	"sum": func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) == 0 {
+			return nil, argCountErr("sum", 0, 1)
+		}
+		items, err := iterate(args[0])
+		if err != nil {
+			return nil, err
+		}
+		start := 0
+		if len(args) >= 2 {
+			start = 0
+			if i, ok := intVal(args[1]); ok {
+				start = i
+			} else if f, ok := numVal(args[1]); ok {
+				res := f
+				for _, it := range items {
+					v, ok := numVal(it)
+					if !ok {
+						return nil, newExc("TypeError", "sum() 只能累加数值")
+					}
+					res += v
+				}
+				return res, nil
+			}
+		}
+		res := start
+		isFloat := false
+		acc := float64(0)
+		for _, it := range items {
+			if i, ok := intVal(it); ok {
+				res += i
+				continue
+			}
+			if f, ok := numVal(it); ok {
+				isFloat = true
+				acc += f
+				continue
+			}
+			return nil, newExc("TypeError", "sum() 只能累加数值")
+		}
+		if isFloat {
+			return float64(res) + acc, nil
+		}
+		return res, nil
+	},
+	"sorted": func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, argCountErr("sorted", len(args), 1)
+		}
+		items, err := iterate(args[0])
+		if err != nil {
+			return nil, err
+		}
+		reverse := kwBool(kwargs, "reverse")
+		if keyFn, ok := kwargs["key"]; ok {
+			decorated := make([]Object, 0, len(items))
+			for i, it := range items {
+				k, err := callObjectRef(keyFn, []Object{it}, nil)
+				if err != nil {
+					return nil, err
+				}
+				decorated = append(decorated, &Tuple{Items: []Object{k, i, it}})
+			}
+			sd := sortObjectsByKey(decorated, reverse)
+			out := make([]Object, len(sd))
+			for i, d := range sd {
+				out[i] = d.(*Tuple).Items[2]
+			}
+			return &List{Items: out}, nil
+		}
+		return &List{Items: sortObjects(items, reverse)}, nil
+	},
+	"reversed": func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) != 1 {
+			return nil, argCountErr("reversed", len(args), 1)
+		}
+		items, err := iterate(args[0])
+		if err != nil {
+			return nil, err
+		}
+		out := make([]Object, len(items))
+		for i := range items {
+			out[i] = items[len(items)-1-i]
+		}
+		return &List{Items: out}, nil
+	},
+	"enumerate": func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, argCountErr("enumerate", len(args), 1)
+		}
+		items, err := iterate(args[0])
+		if err != nil {
+			return nil, err
+		}
+		start := 0
+		if len(args) >= 2 {
+			if v, ok := intVal(args[1]); ok {
+				start = v
+			}
+		}
+		out := make([]Object, len(items))
+		for i, it := range items {
+			out[i] = &Tuple{Items: []Object{start + i, it}}
+		}
+		return &List{Items: out}, nil
+	},
+	"zip": func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 2 {
+			return nil, argCountErr("zip", len(args), 2)
+		}
+		var lists [][]Object
+		for _, a := range args {
+			items, err := iterate(a)
+			if err != nil {
+				return nil, err
+			}
+			lists = append(lists, items)
+		}
+		n := len(lists[0])
+		for _, l := range lists {
+			if len(l) < n {
+				n = len(l)
+			}
+		}
+		out := make([]Object, n)
+		for i := 0; i < n; i++ {
+			t := make([]Object, len(lists))
+			for j := range lists {
+				t[j] = lists[j][i]
+			}
+			out[i] = &Tuple{Items: t}
+		}
+		return &List{Items: out}, nil
+	},
+	"map": func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) != 2 {
+			return nil, argCountErr("map", len(args), 2)
+		}
+		items, err := iterate(args[1])
+		if err != nil {
+			return nil, err
+		}
+		out := make([]Object, len(items))
+		for i, it := range items {
+			v, err := callObjectRef(args[0], []Object{it}, nil)
+			if err != nil {
+				return nil, err
+			}
+			out[i] = v
+		}
+		return &List{Items: out}, nil
+	},
+	"filter": func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) != 2 {
+			return nil, argCountErr("filter", len(args), 2)
+		}
+		items, err := iterate(args[1])
+		if err != nil {
+			return nil, err
+		}
+		out := []Object{}
+		for _, it := range items {
+			v, err := callObjectRef(args[0], []Object{it}, nil)
+			if err != nil {
+				return nil, err
+			}
+			if truthy(v) {
+				out = append(out, it)
+			}
+		}
+		return &List{Items: out}, nil
+	},
+	"any": func(args []Object, kwargs map[string]Object) (Object, error) {
+		items, err := flattenArgs(args)
+		if err != nil {
+			return nil, err
+		}
+		for _, it := range items {
+			if truthy(it) {
+				return true, nil
+			}
+		}
+		return false, nil
+	},
+	"all": func(args []Object, kwargs map[string]Object) (Object, error) {
+		items, err := flattenArgs(args)
+		if err != nil {
+			return nil, err
+		}
+		for _, it := range items {
+			if !truthy(it) {
+				return false, nil
+			}
+		}
+		return true, nil
+	},
+	"chr": func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) != 1 {
+			return nil, argCountErr("chr", len(args), 1)
+		}
+		n, ok := intVal(args[0])
+		if !ok {
+			return nil, newExc("TypeError", "chr() 需要整数参数")
+		}
+		return string(rune(n)), nil
+	},
+	"ord": func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) != 1 {
+			return nil, argCountErr("ord", len(args), 1)
+		}
+		s, ok := args[0].(string)
+		if !ok || len([]rune(s)) != 1 {
+			return nil, newExc("TypeError", "ord() 需要长度为 1 的字符串")
+		}
+		return int([]rune(s)[0]), nil
+	},
+	"hex": func(args []Object, kwargs map[string]Object) (Object, error) {
+		n, err := requireInt("hex", args)
+		if err != nil {
+			return nil, err
+		}
+		return "0x" + strconv.FormatInt(int64(n), 16), nil
+	},
+	"oct": func(args []Object, kwargs map[string]Object) (Object, error) {
+		n, err := requireInt("oct", args)
+		if err != nil {
+			return nil, err
+		}
+		return "0o" + strconv.FormatInt(int64(n), 8), nil
+	},
+	"bin": func(args []Object, kwargs map[string]Object) (Object, error) {
+		n, err := requireInt("bin", args)
+		if err != nil {
+			return nil, err
+		}
+		return "0b" + strconv.FormatInt(int64(n), 2), nil
+	},
+	"isinstance": func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) != 2 {
+			return nil, argCountErr("isinstance", len(args), 2)
+		}
+		return isInstanceOf(args[0], args[1]), nil
+	},
+	"hasattr": func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) != 2 {
+			return nil, argCountErr("hasattr", len(args), 2)
+		}
+		name, ok := args[1].(string)
+		if !ok {
+			return nil, newExc("TypeError", "hasattr() 的属性名必须是字符串")
+		}
+		_, err := getAttr(args[0], name)
+		return err == nil, nil
+	},
+	"getattr": func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 2 {
+			return nil, argCountErr("getattr", len(args), 2)
+		}
+		name, ok := args[1].(string)
+		if !ok {
+			return nil, newExc("TypeError", "getattr() 的属性名必须是字符串")
+		}
+		v, err := getAttr(args[0], name)
+		if err != nil {
+			if len(args) >= 3 {
+				return args[2], nil
+			}
+			return nil, err
+		}
+		return v, nil
+	},
+	"setattr": func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) != 3 {
+			return nil, argCountErr("setattr", len(args), 3)
+		}
+		name, ok := args[1].(string)
+		if !ok {
+			return nil, newExc("TypeError", "setattr() 的属性名必须是字符串")
+		}
+		inst, ok := args[0].(*Instance)
+		if !ok {
+			return nil, newExc("TypeError", "setattr() 只能设置对象属性")
+		}
+		inst.Fields[name] = args[2]
+		return None, nil
+	},
+	"id": func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) != 1 {
+			return nil, argCountErr("id", len(args), 1)
+		}
+		addrCounter += 0x10
+		return 0x1000 + addrCounter, nil
+	},
+	"input": func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) > 0 {
+			fmt.Print(Str(args[0]))
+		}
+		scanner := bufio.NewScanner(os.Stdin)
+		if scanner.Scan() {
+			return scanner.Text(), nil
+		}
+		return "", nil
+	},
+	"exit": func(args []Object, kwargs map[string]Object) (Object, error) {
+		code := 0
+		if len(args) > 0 {
+			if n, ok := intVal(args[0]); ok {
+				code = n
+			}
+		}
+		os.Exit(code)
+		return None, nil
+	},
+}
+
+func requireInt(name string, args []Object) (int, error) {
+	if len(args) != 1 {
+		return 0, argCountErr(name, len(args), 1)
+	}
+	n, ok := intVal(args[0])
+	if !ok {
+		return 0, newExc("TypeError", "%s() 需要整数参数", name)
+	}
+	return n, nil
+}
+
+// flattenArgs 支持 min(1,2,3) 与 min([1,2,3]) 两种写法
+func flattenArgs(args []Object) ([]Object, error) {
+	if len(args) == 1 {
+		if _, ok := args[0].(string); !ok {
+			if items, err := iterate(args[0]); err == nil {
+				return items, nil
+			}
+		}
+	}
+	return args, nil
+}
+
+func minMax(items []Object, wantMax bool, kwargs map[string]Object) (Object, error) {
+	if keyFn, ok := kwargs["key"]; ok {
+		best := items[0]
+		bestKey, err := callObjectRef(keyFn, []Object{best}, nil)
+		if err != nil {
+			return nil, err
+		}
+		for _, it := range items[1:] {
+			k, err := callObjectRef(keyFn, []Object{it}, nil)
+			if err != nil {
+				return nil, err
+			}
+			c, ok := compareValues(k, bestKey)
+			if !ok {
+				c, _ = compareValues(Repr(k), Repr(bestKey))
+			}
+			if (wantMax && c > 0) || (!wantMax && c < 0) {
+				best, bestKey = it, k
+			}
+		}
+		return best, nil
+	}
+	best := items[0]
+	for _, it := range items[1:] {
+		c, ok := compareValues(it, best)
+		if !ok {
+			c, _ = compareValues(Repr(it), Repr(best))
+		}
+		if (wantMax && c > 0) || (!wantMax && c < 0) {
+			best = it
+		}
+	}
+	return best, nil
+}
+
+func isInstanceOf(obj Object, cls Object) bool {
+	switch c := cls.(type) {
+	case *Class:
+		inst, ok := obj.(*Instance)
+		if !ok {
+			return false
+		}
+		for cur := inst.Class; cur != nil; cur = cur.Parent {
+			if cur == c {
+				return true
+			}
+		}
+		return false
+	case *PyType:
+		return typeName(obj) == c.Name
+	case *Tuple:
+		for _, it := range c.Items {
+			if isInstanceOf(obj, it) {
+				return true
+			}
+		}
+		return false
+	}
+	return false
+}
+
+// ============ 内置模块 ============
+
+func newMathModule() *Module {
+	gcd := func(a, b int) int {
+		if a < 0 {
+			a = -a
+		}
+		if b < 0 {
+			b = -b
+		}
+		for b != 0 {
+			a, b = b, a%b
+		}
+		return a
+	}
+	factorial := func(n int) int {
+		r := 1
+		for k := 2; k <= n; k++ {
+			r *= k
+		}
+		return r
+	}
+	num1 := func(name string, args []Object, fn func(float64) float64) (Object, error) {
+		if len(args) < 1 {
+			return nil, argCountErr(name, len(args), 1)
+		}
+		f, ok := toFloat(args[0])
+		if !ok {
+			return nil, newExc("TypeError", "%s() 需要数值参数", name)
+		}
+		return fn(f), nil
+	}
+	m := &Module{Name: "math", Attrs: map[string]Object{}}
+	bind := func(name string, fn func(args []Object, kwargs map[string]Object) (Object, error)) {
+		m.Attrs[name] = &Builtin{Name: "math." + name, Fn: fn}
+	}
+	bind("floor", func(args []Object, kwargs map[string]Object) (Object, error) {
+		v, err := num1("floor", args, math.Floor)
+		if err != nil {
+			return nil, err
+		}
+		return int(v.(float64)), nil
+	})
+	bind("ceil", func(args []Object, kwargs map[string]Object) (Object, error) {
+		v, err := num1("ceil", args, math.Ceil)
+		if err != nil {
+			return nil, err
+		}
+		return int(v.(float64)), nil
+	})
+	bind("trunc", func(args []Object, kwargs map[string]Object) (Object, error) {
+		v, err := num1("trunc", args, math.Trunc)
+		if err != nil {
+			return nil, err
+		}
+		return int(v.(float64)), nil
+	})
+	bind("sqrt", func(args []Object, kwargs map[string]Object) (Object, error) {
+		return num1("sqrt", args, math.Sqrt)
+	})
+	bind("fabs", func(args []Object, kwargs map[string]Object) (Object, error) {
+		return num1("fabs", args, math.Abs)
+	})
+	bind("exp", func(args []Object, kwargs map[string]Object) (Object, error) {
+		return num1("exp", args, math.Exp)
+	})
+	bind("log", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, argCountErr("log", len(args), 1)
+		}
+		f, ok := toFloat(args[0])
+		if !ok {
+			return nil, newExc("TypeError", "log() 需要数值参数")
+		}
+		if len(args) >= 2 {
+			b, ok := toFloat(args[1])
+			if !ok {
+				return nil, newExc("TypeError", "log() 的底数必须是数值")
+			}
+			return math.Log(f) / math.Log(b), nil
+		}
+		return math.Log(f), nil
+	})
+	bind("log10", func(args []Object, kwargs map[string]Object) (Object, error) {
+		return num1("log10", args, math.Log10)
+	})
+	bind("log2", func(args []Object, kwargs map[string]Object) (Object, error) {
+		return num1("log2", args, math.Log2)
+	})
+	bind("sin", func(args []Object, kwargs map[string]Object) (Object, error) {
+		return num1("sin", args, math.Sin)
+	})
+	bind("cos", func(args []Object, kwargs map[string]Object) (Object, error) {
+		return num1("cos", args, math.Cos)
+	})
+	bind("tan", func(args []Object, kwargs map[string]Object) (Object, error) {
+		return num1("tan", args, math.Tan)
+	})
+	bind("asin", func(args []Object, kwargs map[string]Object) (Object, error) {
+		return num1("asin", args, math.Asin)
+	})
+	bind("acos", func(args []Object, kwargs map[string]Object) (Object, error) {
+		return num1("acos", args, math.Acos)
+	})
+	bind("atan", func(args []Object, kwargs map[string]Object) (Object, error) {
+		return num1("atan", args, math.Atan)
+	})
+	// Go 标准库没有 math.Degrees / math.Radians，按定义换算。
+	// 系数先算再乘，与 CPython 的做法一致，避免浮点结果的末位差异。
+	bind("degrees", func(args []Object, kwargs map[string]Object) (Object, error) {
+		return num1("degrees", args, func(f float64) float64 { return f * (180 / math.Pi) })
+	})
+	bind("radians", func(args []Object, kwargs map[string]Object) (Object, error) {
+		return num1("radians", args, func(f float64) float64 { return f * (math.Pi / 180) })
+	})
+	bind("pow", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 2 {
+			return nil, argCountErr("pow", len(args), 2)
+		}
+		a, ok := toFloat(args[0])
+		if !ok {
+			return nil, newExc("TypeError", "pow() 需要数值参数")
+		}
+		b, ok2 := toFloat(args[1])
+		if !ok2 {
+			return nil, newExc("TypeError", "pow() 需要数值参数")
+		}
+		return math.Pow(a, b), nil
+	})
+	bind("hypot", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 2 {
+			return nil, argCountErr("hypot", len(args), 2)
+		}
+		a, _ := toFloat(args[0])
+		b, _ := toFloat(args[1])
+		return math.Hypot(a, b), nil
+	})
+	bind("atan2", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 2 {
+			return nil, argCountErr("atan2", len(args), 2)
+		}
+		a, _ := toFloat(args[0])
+		b, _ := toFloat(args[1])
+		return math.Atan2(a, b), nil
+	})
+	bind("fmod", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 2 {
+			return nil, argCountErr("fmod", len(args), 2)
+		}
+		a, _ := toFloat(args[0])
+		b, _ := toFloat(args[1])
+		return math.Mod(a, b), nil
+	})
+	bind("copysign", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 2 {
+			return nil, argCountErr("copysign", len(args), 2)
+		}
+		a, _ := toFloat(args[0])
+		b, _ := toFloat(args[1])
+		return math.Copysign(a, b), nil
+	})
+	bind("modf", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, argCountErr("modf", len(args), 1)
+		}
+		f, ok := toFloat(args[0])
+		if !ok {
+			return nil, newExc("TypeError", "modf() 需要数值参数")
+		}
+		i, frac := math.Modf(f)
+		return &Tuple{Items: []Object{frac, i}}, nil
+	})
+	bind("factorial", func(args []Object, kwargs map[string]Object) (Object, error) {
+		n, err := requireInt("factorial", args)
+		if err != nil {
+			return nil, err
+		}
+		if n < 0 {
+			return nil, newExc("ValueError", "factorial() not defined for negative values")
+		}
+		return factorial(n), nil
+	})
+	bind("gcd", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 2 {
+			return nil, argCountErr("gcd", len(args), 2)
+		}
+		a, ok := intVal(args[0])
+		if !ok {
+			return nil, newExc("TypeError", "gcd() 需要整数参数")
+		}
+		b, ok2 := intVal(args[1])
+		if !ok2 {
+			return nil, newExc("TypeError", "gcd() 需要整数参数")
+		}
+		return gcd(a, b), nil
+	})
+	m.Attrs["pi"] = math.Pi
+	m.Attrs["e"] = math.E
+	m.Attrs["tau"] = math.Pi * 2
+	m.Attrs["inf"] = math.Inf(1)
+	m.Attrs["nan"] = math.NaN()
+	return m
+}
+
+func newOsModule() *Module {
+	m := &Module{Name: "os", Attrs: map[string]Object{}}
+	bind := func(name string, fn func(args []Object, kwargs map[string]Object) (Object, error)) {
+		m.Attrs[name] = &Builtin{Name: "os." + name, Fn: fn}
+	}
+	bind("getcwd", func(args []Object, kwargs map[string]Object) (Object, error) {
+		wd, err := os.Getwd()
+		if err != nil {
+			return "", nil
+		}
+		return wd, nil
+	})
+	bind("listdir", func(args []Object, kwargs map[string]Object) (Object, error) {
+		path := "."
+		if len(args) > 0 {
+			if s, ok := args[0].(string); ok {
+				path = s
+			}
+		}
+		entries, err := os.ReadDir(path)
+		if err != nil {
+			return nil, newExc("FileNotFoundError", "No such file or directory: '%s'", path)
+		}
+		out := make([]Object, 0, len(entries))
+		for _, e := range entries {
+			out = append(out, e.Name())
+		}
+		sort.SliceStable(out, func(i, j int) bool { return out[i].(string) < out[j].(string) })
+		return &List{Items: out}, nil
+	})
+	bind("getpid", func(args []Object, kwargs map[string]Object) (Object, error) {
+		return os.Getpid(), nil
+	})
+	m.Attrs["name"] = "posix"
+	m.Attrs["sep"] = "/"
+
+	// os.path 子模块
+	p := &Module{Name: "os.path", Attrs: map[string]Object{}}
+	pbind := func(name string, fn func(args []Object, kwargs map[string]Object) (Object, error)) {
+		p.Attrs[name] = &Builtin{Name: "os.path." + name, Fn: fn}
+	}
+	pathArg := func(args []Object) string {
+		if len(args) > 0 {
+			if s, ok := args[0].(string); ok {
+				return s
+			}
+		}
+		return ""
+	}
+	pbind("join", func(args []Object, kwargs map[string]Object) (Object, error) {
+		parts := make([]string, 0, len(args))
+		for _, a := range args {
+			s, ok := a.(string)
+			if !ok {
+				return nil, newExc("TypeError", "os.path.join() 需要字符串参数")
+			}
+			parts = append(parts, s)
+		}
+		return filepath.Join(parts...), nil
+	})
+	pbind("exists", func(args []Object, kwargs map[string]Object) (Object, error) {
+		_, err := os.Stat(pathArg(args))
+		return err == nil, nil
+	})
+	pbind("isfile", func(args []Object, kwargs map[string]Object) (Object, error) {
+		fi, err := os.Stat(pathArg(args))
+		return err == nil && !fi.IsDir(), nil
+	})
+	pbind("isdir", func(args []Object, kwargs map[string]Object) (Object, error) {
+		fi, err := os.Stat(pathArg(args))
+		return err == nil && fi.IsDir(), nil
+	})
+	pbind("basename", func(args []Object, kwargs map[string]Object) (Object, error) {
+		return filepath.Base(pathArg(args)), nil
+	})
+	pbind("dirname", func(args []Object, kwargs map[string]Object) (Object, error) {
+		return filepath.Dir(pathArg(args)), nil
+	})
+	pbind("abspath", func(args []Object, kwargs map[string]Object) (Object, error) {
+		abs, err := filepath.Abs(pathArg(args))
+		if err != nil {
+			return "", nil
+		}
+		return abs, nil
+	})
+	pbind("splitext", func(args []Object, kwargs map[string]Object) (Object, error) {
+		ext := filepath.Ext(pathArg(args))
+		base := strings.TrimSuffix(pathArg(args), ext)
+		return &Tuple{Items: []Object{base, ext}}, nil
+	})
+	m.Attrs["path"] = p
+	return m
+}
+
+func newSysModule(argv []Object) *Module {
+	m := &Module{Name: "sys", Attrs: map[string]Object{}}
+	m.Attrs["argv"] = &List{Items: argv}
+	m.Attrs["version"] = runtime.Version()
+	m.Attrs["platform"] = runtime.GOOS
+	m.Attrs["exit"] = &Builtin{Name: "sys.exit", Fn: func(args []Object, kwargs map[string]Object) (Object, error) {
+		code := 0
+		if len(args) > 0 {
+			if n, ok := intVal(args[0]); ok {
+				code = n
+			}
+		}
+		os.Exit(code)
+		return None, nil
+	}}
+	return m
+}
+
+// exceptionTypeNames 是支持的内建异常类型
+var exceptionTypeNames = []string{
+	"Exception", "BaseException", "ValueError", "TypeError", "IndexError",
+	"KeyError", "ZeroDivisionError", "NameError", "AttributeError",
+	"RuntimeError", "NotImplementedError", "StopIteration", "AssertionError",
+	"FileNotFoundError", "ImportError", "SyntaxError", "OverflowError",
+	"RecursionError", "ArithmeticError", "LookupError", "OSError",
+}
+
+func isExceptionTypeName(name string) bool {
+	for _, n := range exceptionTypeNames {
+		if n == name {
+			return true
+		}
+	}
+	return false
+}
+
+// initGlobalEnv 初始化全局作用域
+func initGlobalEnv(argv []Object) *Environment {
+	env := NewEnvironment(nil)
+	for name, fn := range builtinFuncs {
+		env.Set(name, &Builtin{Name: name, Fn: fn})
+	}
+	env.Set("math", newMathModule())
+	env.Set("os", newOsModule())
+	env.Set("sys", newSysModule(argv))
+	for _, name := range exceptionTypeNames {
+		env.Set(name, &PyType{Name: name})
+	}
+	return env
+}

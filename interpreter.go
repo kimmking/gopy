@@ -1,6 +1,1354 @@
 package main
 
-// interpreter.go
-// The simple line-based interpreter is implemented in main.go for now.
-// This file is kept for project structure compatibility.
-// Future lexer/parser based interpreter can be added here without name conflicts.
+import (
+	"strings"
+)
+
+// ============ 控制流信号 ============
+// return / break / continue 通过信号向上传递，而不是共享解释器字段，
+// 因此递归调用不会互相覆盖返回值。
+
+type sigKind int
+
+const (
+	sigNone sigKind = iota
+	sigReturn
+	sigBreak
+	sigContinue
+)
+
+type signal struct {
+	kind sigKind
+	val  Object
+}
+
+type Interpreter struct {
+	globals   *Environment
+	env       *Environment
+	callDepth int
+	reprDepth int
+}
+
+// activeInterp 供内建函数（map / filter / sorted 的 key）回调用户函数
+var activeInterp *Interpreter
+
+func NewInterpreter(argv []Object) *Interpreter {
+	g := initGlobalEnv(argv)
+	interp := &Interpreter{globals: g, env: g}
+	activeInterp = interp
+	return interp
+}
+
+func (i *Interpreter) Run(prog *Program) error {
+	_, err := i.execBlock(prog.Body)
+	return err
+}
+
+// ============ 语句执行 ============
+
+func (i *Interpreter) execBlock(stmts []Stmt) (*signal, error) {
+	for _, s := range stmts {
+		sig, err := i.exec(s)
+		if err != nil || sig != nil {
+			return sig, err
+		}
+	}
+	return nil, nil
+}
+
+func (i *Interpreter) exec(s Stmt) (*signal, error) {
+	switch st := s.(type) {
+	case *ExprStmt:
+		_, err := i.eval(st.Value)
+		return nil, err
+
+	case *Assign:
+		return nil, i.execAssign(st)
+
+	case *AugAssign:
+		return nil, i.execAugAssign(st)
+
+	case *IfStmt:
+		cond, err := i.eval(st.Cond)
+		if err != nil {
+			return nil, err
+		}
+		if truthy(cond) {
+			return i.execBlock(st.Body)
+		}
+		for _, el := range st.Elifs {
+			c, err := i.eval(el.Cond)
+			if err != nil {
+				return nil, err
+			}
+			if truthy(c) {
+				return i.execBlock(el.Body)
+			}
+		}
+		if st.Else != nil {
+			return i.execBlock(st.Else)
+		}
+		return nil, nil
+
+	case *WhileStmt:
+		broken := false
+		for {
+			cond, err := i.eval(st.Cond)
+			if err != nil {
+				return nil, err
+			}
+			if !truthy(cond) {
+				break
+			}
+			sig, err := i.execBlock(st.Body)
+			if err != nil {
+				return nil, err
+			}
+			if sig == nil {
+				continue
+			}
+			switch sig.kind {
+			case sigBreak:
+				broken = true
+			case sigContinue:
+				continue
+			case sigReturn:
+				return sig, nil
+			}
+			if broken {
+				break
+			}
+		}
+		if !broken && st.Else != nil {
+			return i.execBlock(st.Else)
+		}
+		return nil, nil
+
+	case *ForStmt:
+		iterVal, err := i.eval(st.Iter)
+		if err != nil {
+			return nil, err
+		}
+		items, err := iterate(iterVal)
+		if err != nil {
+			return nil, err
+		}
+		broken := false
+		for _, item := range items {
+			if err := i.bindTargets(st.Targets, item); err != nil {
+				return nil, err
+			}
+			sig, err := i.execBlock(st.Body)
+			if err != nil {
+				return nil, err
+			}
+			if sig == nil {
+				continue
+			}
+			switch sig.kind {
+			case sigBreak:
+				broken = true
+			case sigContinue:
+				continue
+			case sigReturn:
+				return sig, nil
+			}
+			if broken {
+				break
+			}
+		}
+		if !broken && st.Else != nil {
+			return i.execBlock(st.Else)
+		}
+		return nil, nil
+
+	case *FuncDef:
+		defaults, err := i.evalDefaults(st.Params)
+		if err != nil {
+			return nil, err
+		}
+		i.env.Set(st.Name, &Function{
+			Name:     st.Name,
+			Params:   st.Params,
+			Body:     st.Body,
+			Env:      i.env,
+			Defaults: defaults,
+		})
+		return nil, nil
+
+	case *ReturnStmt:
+		if st.Value == nil {
+			return &signal{kind: sigReturn, val: None}, nil
+		}
+		v, err := i.eval(st.Value)
+		if err != nil {
+			return nil, err
+		}
+		return &signal{kind: sigReturn, val: v}, nil
+
+	case *BreakStmt:
+		return &signal{kind: sigBreak}, nil
+
+	case *ContinueStmt:
+		return &signal{kind: sigContinue}, nil
+
+	case *PassStmt:
+		return nil, nil
+
+	case *ClassDef:
+		return nil, i.execClassDef(st)
+
+	case *TryStmt:
+		return i.execTry(st)
+
+	case *ImportStmt:
+		for _, a := range st.Names {
+			mod, err := i.importModule(a.Path)
+			if err != nil {
+				return nil, err
+			}
+			name := a.Alias
+			if name == "" {
+				name = a.Path[0]
+			}
+			i.env.Set(name, mod)
+		}
+		return nil, nil
+
+	case *FromImportStmt:
+		mod, err := i.importModule(st.Module)
+		if err != nil {
+			return nil, err
+		}
+		m, ok := mod.(*Module)
+		if !ok {
+			return nil, newExc("ImportError", "'%s' 不是模块", strings.Join(st.Module, "."))
+		}
+		for _, a := range st.Names {
+			if a.Path[0] == "*" {
+				for k, v := range m.Attrs {
+					i.env.Set(k, v)
+				}
+				continue
+			}
+			v, ok := m.Attrs[a.Path[0]]
+			if !ok {
+				return nil, newExc("ImportError", "无法从 '%s' 导入名称 '%s'", m.Name, a.Path[0])
+			}
+			name := a.Alias
+			if name == "" {
+				name = a.Path[0]
+			}
+			i.env.Set(name, v)
+		}
+		return nil, nil
+
+	case *RaiseStmt:
+		return nil, i.execRaise(st)
+
+	case *AssertStmt:
+		v, err := i.eval(st.Cond)
+		if err != nil {
+			return nil, err
+		}
+		if !truthy(v) {
+			msg := ""
+			if st.Msg != nil {
+				mv, err := i.eval(st.Msg)
+				if err != nil {
+					return nil, err
+				}
+				msg = Str(mv)
+			}
+			return nil, &PyException{ExcType: "AssertionError", Msg: msg}
+		}
+		return nil, nil
+
+	case *DeleteStmt:
+		return nil, i.execDelete(st)
+
+	case *GlobalStmt:
+		if i.env.declaredGlobal == nil {
+			i.env.declaredGlobal = map[string]bool{}
+		}
+		for _, n := range st.Names {
+			i.env.declaredGlobal[n] = true
+			if _, ok := i.env.global.vars[n]; !ok {
+				i.env.global.vars[n] = None
+			}
+		}
+		return nil, nil
+	}
+	return nil, newExc("RuntimeError", "无法执行的语句")
+}
+
+// ---------- 赋值 ----------
+
+func (i *Interpreter) execAssign(st *Assign) error {
+	v, err := i.eval(st.Value)
+	if err != nil {
+		return err
+	}
+	if len(st.Targets) == 1 {
+		return i.assignTarget(st.Targets[0], v)
+	}
+	// 元组解包：a, b = 1, 2
+	if seq, ok := v.(*Tuple); ok {
+		if len(seq.Items) != len(st.Targets) {
+			return newExc("ValueError", "解包数量不匹配：期望 %d 个，实际 %d 个", len(st.Targets), len(seq.Items))
+		}
+		for k, t := range st.Targets {
+			if err := i.assignTarget(t, seq.Items[k]); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if seq, ok := v.(*List); ok {
+		if len(seq.Items) != len(st.Targets) {
+			return newExc("ValueError", "解包数量不匹配：期望 %d 个，实际 %d 个", len(st.Targets), len(seq.Items))
+		}
+		for k, t := range st.Targets {
+			if err := i.assignTarget(t, seq.Items[k]); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	// 链式赋值：a = b = 1
+	for _, t := range st.Targets {
+		if err := i.assignTarget(t, v); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (i *Interpreter) assignTarget(t Expr, v Object) error {
+	switch tt := t.(type) {
+	case *Name:
+		i.setVar(tt.Id, v)
+		return nil
+	case *Attribute:
+		obj, err := i.eval(tt.Value)
+		if err != nil {
+			return err
+		}
+		inst, ok := obj.(*Instance)
+		if !ok {
+			return newExc("AttributeError", "'%s' 对象不支持属性赋值", typeName(obj))
+		}
+		inst.Fields[tt.Attr] = v
+		return nil
+	case *Subscript:
+		obj, err := i.eval(tt.Value)
+		if err != nil {
+			return err
+		}
+		key, err := i.eval(tt.Index)
+		if err != nil {
+			return err
+		}
+		return i.setItem(obj, key, v)
+	case *TupleLit:
+		items, err := iterate(v)
+		if err != nil {
+			return newExc("TypeError", "无法解包 '%s' 对象", typeName(v))
+		}
+		if len(items) != len(tt.Items) {
+			return newExc("ValueError", "解包数量不匹配：期望 %d 个，实际 %d 个", len(tt.Items), len(items))
+		}
+		for k, sub := range tt.Items {
+			if err := i.assignTarget(sub, items[k]); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return newExc("SyntaxError", "无法赋值给该目标")
+}
+
+// setVar 采用 Python 语义：赋值在当前作用域建立绑定，
+// 除非该名字在当前帧被 global 声明过。
+func (i *Interpreter) setVar(name string, v Object) {
+	if i.env.declaredGlobal[name] {
+		i.env.global.vars[name] = v
+		return
+	}
+	i.env.Set(name, v)
+}
+
+func (i *Interpreter) bindTargets(targets []Expr, v Object) error {
+	if len(targets) == 1 {
+		return i.assignTarget(targets[0], v)
+	}
+	items, err := iterate(v)
+	if err != nil {
+		return newExc("TypeError", "无法解包 '%s' 对象", typeName(v))
+	}
+	if len(items) != len(targets) {
+		return newExc("ValueError", "解包数量不匹配：期望 %d 个，实际 %d 个", len(targets), len(items))
+	}
+	for k, t := range targets {
+		if err := i.assignTarget(t, items[k]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (i *Interpreter) setItem(obj, key, v Object) error {
+	switch x := obj.(type) {
+	case *Dict:
+		x.Set(key, v)
+		return nil
+	case *List:
+		n, ok := intVal(key)
+		if !ok {
+			return newExc("TypeError", "列表下标必须是整数，实际为 '%s'", typeName(key))
+		}
+		if n < 0 {
+			n += len(x.Items)
+		}
+		if n < 0 || n >= len(x.Items) {
+			return newExc("IndexError", "list assignment index out of range")
+		}
+		x.Items[n] = v
+		return nil
+	}
+	return newExc("TypeError", "'%s' 对象不支持下标赋值", typeName(obj))
+}
+
+func (i *Interpreter) execAugAssign(st *AugAssign) error {
+	cur, err := i.eval(st.Target)
+	if err != nil {
+		return err
+	}
+	rhs, err := i.eval(st.Value)
+	if err != nil {
+		return err
+	}
+	res, err := binaryOp(strings.TrimSuffix(st.Op, "="), cur, rhs)
+	if err != nil {
+		return err
+	}
+	return i.assignTarget(st.Target, res)
+}
+
+func (i *Interpreter) execDelete(st *DeleteStmt) error {
+	for _, t := range st.Targets {
+		switch tt := t.(type) {
+		case *Name:
+			if !i.env.Delete(tt.Id) {
+				return newExc("NameError", "name '%s' is not defined", tt.Id)
+			}
+		case *Attribute:
+			obj, err := i.eval(tt.Value)
+			if err != nil {
+				return err
+			}
+			inst, ok := obj.(*Instance)
+			if !ok {
+				return newExc("AttributeError", "'%s' 对象不支持属性删除", typeName(obj))
+			}
+			delete(inst.Fields, tt.Attr)
+		case *Subscript:
+			obj, err := i.eval(tt.Value)
+			if err != nil {
+				return err
+			}
+			key, err := i.eval(tt.Index)
+			if err != nil {
+				return err
+			}
+			switch x := obj.(type) {
+			case *Dict:
+				x.Delete(key)
+			case *List:
+				n, ok := intVal(key)
+				if !ok {
+					return newExc("TypeError", "列表下标必须是整数")
+				}
+				if n < 0 {
+					n += len(x.Items)
+				}
+				if n < 0 || n >= len(x.Items) {
+					return newExc("IndexError", "list assignment index out of range")
+				}
+				x.Items = append(x.Items[:n], x.Items[n+1:]...)
+			default:
+				return newExc("TypeError", "'%s' 对象不支持元素删除", typeName(obj))
+			}
+		default:
+			return newExc("SyntaxError", "无法删除该目标")
+		}
+	}
+	return nil
+}
+
+// ---------- 类 ----------
+
+func (i *Interpreter) execClassDef(st *ClassDef) error {
+	cls := &Class{Name: st.Name, Methods: map[string]*Function{}, Attrs: map[string]Object{}}
+	if len(st.Bases) > 0 {
+		base, err := i.eval(st.Bases[0])
+		if err != nil {
+			return err
+		}
+		bcls, ok := base.(*Class)
+		if !ok {
+			return newExc("TypeError", "基类必须是类，实际为 '%s'", typeName(base))
+		}
+		cls.Parent = bcls
+	}
+	classEnv := NewEnvironment(i.env)
+	saved := i.env
+	i.env = classEnv
+	var err error
+	for _, bs := range st.Body {
+		if fd, ok := bs.(*FuncDef); ok {
+			var defaults []Object
+			defaults, err = i.evalDefaults(fd.Params)
+			if err != nil {
+				break
+			}
+			cls.Methods[fd.Name] = &Function{
+				Name:     fd.Name,
+				Params:   fd.Params,
+				Body:     fd.Body,
+				Env:      classEnv,
+				Defaults: defaults,
+			}
+			continue
+		}
+		_, err = i.exec(bs)
+		if err != nil {
+			break
+		}
+	}
+	i.env = saved
+	if err != nil {
+		return err
+	}
+	// 类体中的非函数绑定成为类属性
+	for name, v := range classEnv.vars {
+		if _, isFn := v.(*Function); !isFn {
+			cls.Attrs[name] = v
+		}
+	}
+	i.env.Set(st.Name, cls)
+	return nil
+}
+
+func (i *Interpreter) evalDefaults(params []Param) ([]Object, error) {
+	var defaults []Object
+	for _, p := range params {
+		if p.Default == nil {
+			defaults = append(defaults, nil)
+			continue
+		}
+		v, err := i.eval(p.Default)
+		if err != nil {
+			return nil, err
+		}
+		defaults = append(defaults, v)
+	}
+	return defaults, nil
+}
+
+func (i *Interpreter) instantiate(cls *Class, args []Object, kwargs map[string]Object) (Object, error) {
+	inst := &Instance{Class: cls, Fields: map[string]Object{}}
+	if fn, ok := cls.LookupMethod("__init__"); ok {
+		all := make([]Object, 0, len(args)+1)
+		all = append(all, inst)
+		all = append(all, args...)
+		if _, err := i.callFunction(fn, all, kwargs); err != nil {
+			return nil, err
+		}
+	}
+	return inst, nil
+}
+
+// init 注入实例字符串化钩子：Repr 通过它调用 __str__
+func init() {
+	instanceStrHook = func(inst *Instance) (string, bool) {
+		if activeInterp == nil || activeInterp.reprDepth >= 4 {
+			return "", false
+		}
+		if _, ok := inst.Class.LookupMethod("__str__"); !ok {
+			return "", false
+		}
+		activeInterp.reprDepth++
+		defer func() { activeInterp.reprDepth-- }()
+		m, err := getAttr(inst, "__str__")
+		if err != nil {
+			return "", false
+		}
+		v, err := activeInterp.callObject(m, nil, nil)
+		if err != nil {
+			return "", false
+		}
+		s, ok := v.(string)
+		return s, ok
+	}
+}
+
+// ---------- 异常处理 ----------
+
+func (i *Interpreter) execTry(st *TryStmt) (*signal, error) {
+	sig, err := i.execBlock(st.Body)
+	if err == nil && sig == nil && st.Else != nil {
+		sig, err = i.execBlock(st.Else)
+	}
+	if err != nil {
+		exc, ok := err.(*PyException)
+		if !ok {
+			if st.Finally != nil {
+				i.execBlock(st.Finally)
+			}
+			return nil, err
+		}
+		matched := false
+		for _, h := range st.Handlers {
+			if h.ExcType == nil {
+				matched = true
+			} else {
+				tv, terr := i.eval(h.ExcType)
+				if terr != nil {
+					continue
+				}
+				if isInstanceOf(Object(exc), tv) {
+					matched = true
+				}
+			}
+			if !matched {
+				continue
+			}
+			if h.Name != "" {
+				i.env.Set(h.Name, Object(exc))
+			}
+			sig, err = i.execBlock(h.Body)
+			break
+		}
+	}
+	if st.Finally != nil {
+		fsig, ferr := i.execBlock(st.Finally)
+		if ferr != nil {
+			return nil, ferr
+		}
+		if fsig != nil {
+			return fsig, nil
+		}
+	}
+	return sig, err
+}
+
+func (i *Interpreter) execRaise(st *RaiseStmt) error {
+	if st.Value == nil {
+		return &PyException{ExcType: "RuntimeError", Msg: "No active exception to re-raise"}
+	}
+	v, err := i.eval(st.Value)
+	if err != nil {
+		return err
+	}
+	switch x := v.(type) {
+	case *PyException:
+		return x
+	case *PyType:
+		return &PyException{ExcType: x.Name}
+	case string:
+		return &PyException{ExcType: "Exception", Msg: x}
+	}
+	return newExc("TypeError", "异常必须继承自 BaseException，实际为 '%s'", typeName(v))
+}
+
+// ---------- import ----------
+
+func (i *Interpreter) importModule(path []string) (Object, error) {
+	if len(path) == 0 {
+		return nil, newExc("ImportError", "空的模块名")
+	}
+	full := strings.Join(path, ".")
+	cur, ok := i.globals.Get(path[0])
+	if !ok {
+		return nil, newExc("ImportError", "没有名为 '%s' 的模块", full)
+	}
+	for _, p := range path[1:] {
+		m, ok := cur.(*Module)
+		if !ok {
+			return nil, newExc("ImportError", "没有名为 '%s' 的模块", full)
+		}
+		cur, ok = m.Attrs[p]
+		if !ok {
+			return nil, newExc("ImportError", "没有名为 '%s' 的模块", full)
+		}
+	}
+	return cur, nil
+}
+
+// ============ 表达式求值 ============
+
+func (i *Interpreter) eval(e Expr) (Object, error) {
+	switch x := e.(type) {
+	case *IntLit:
+		return x.Value, nil
+	case *FloatLit:
+		return x.Value, nil
+	case *StrLit:
+		return x.Value, nil
+	case *BoolLit:
+		return x.Value, nil
+	case *NoneLit:
+		return None, nil
+
+	case *Name:
+		if v, ok := i.env.Get(x.Id); ok {
+			return v, nil
+		}
+		if v, ok := i.globals.Get(x.Id); ok {
+			return v, nil
+		}
+		return nil, newExc("NameError", "name '%s' is not defined", x.Id)
+
+	case *ListLit:
+		items := make([]Object, len(x.Items))
+		for k, it := range x.Items {
+			v, err := i.eval(it)
+			if err != nil {
+				return nil, err
+			}
+			items[k] = v
+		}
+		return &List{Items: items}, nil
+
+	case *TupleLit:
+		items := make([]Object, len(x.Items))
+		for k, it := range x.Items {
+			v, err := i.eval(it)
+			if err != nil {
+				return nil, err
+			}
+			items[k] = v
+		}
+		return &Tuple{Items: items}, nil
+
+	case *DictLit:
+		d := NewDict()
+		for k := range x.Keys {
+			kv, err := i.eval(x.Keys[k])
+			if err != nil {
+				return nil, err
+			}
+			vv, err := i.eval(x.Vals[k])
+			if err != nil {
+				return nil, err
+			}
+			d.Set(kv, vv)
+		}
+		return d, nil
+
+	case *BinOp:
+		l, err := i.eval(x.Left)
+		if err != nil {
+			return nil, err
+		}
+		r, err := i.eval(x.Right)
+		if err != nil {
+			return nil, err
+		}
+		return binaryOp(x.Op, l, r)
+
+	case *UnaryOp:
+		v, err := i.eval(x.Operand)
+		if err != nil {
+			return nil, err
+		}
+		return unaryOp(x.Op, v)
+
+	case *BoolOp:
+		var last Object
+		for _, operand := range x.Values {
+			v, err := i.eval(operand)
+			if err != nil {
+				return nil, err
+			}
+			last = v
+			if x.Op == "and" && !truthy(v) {
+				return v, nil
+			}
+			if x.Op == "or" && truthy(v) {
+				return v, nil
+			}
+		}
+		return last, nil
+
+	case *Compare:
+		return i.evalCompare(x)
+
+	case *Call:
+		return i.evalCall(x)
+
+	case *Subscript:
+		obj, err := i.eval(x.Value)
+		if err != nil {
+			return nil, err
+		}
+		if sl, ok := x.Index.(*Slice); ok {
+			var start, stop, step Object
+			if sl.Start != nil {
+				if start, err = i.eval(sl.Start); err != nil {
+					return nil, err
+				}
+			}
+			if sl.Stop != nil {
+				if stop, err = i.eval(sl.Stop); err != nil {
+					return nil, err
+				}
+			}
+			if sl.Step != nil {
+				if step, err = i.eval(sl.Step); err != nil {
+					return nil, err
+				}
+			}
+			return i.sliceObject(obj, start, stop, step)
+		}
+		key, err := i.eval(x.Index)
+		if err != nil {
+			return nil, err
+		}
+		return i.getItem(obj, key)
+
+	case *Attribute:
+		obj, err := i.eval(x.Value)
+		if err != nil {
+			return nil, err
+		}
+		return getAttr(obj, x.Attr)
+
+	case *FStrLit:
+		return i.evalFString(x)
+
+	case *ListComp:
+		return i.evalListComp(x)
+
+	case *DictComp:
+		return i.evalDictComp(x)
+
+	case *CondExpr:
+		cond, err := i.eval(x.Cond)
+		if err != nil {
+			return nil, err
+		}
+		if truthy(cond) {
+			return i.eval(x.Body)
+		}
+		return i.eval(x.Else)
+
+	case *Lambda:
+		defaults, err := i.evalDefaults(x.Params)
+		if err != nil {
+			return nil, err
+		}
+		return &Function{
+			Name:     "<lambda>",
+			Params:   x.Params,
+			Body:     []Stmt{&ReturnStmt{Value: x.Body}},
+			Env:      i.env,
+			Defaults: defaults,
+		}, nil
+	}
+	return nil, newExc("RuntimeError", "无法求值的表达式")
+}
+
+func (i *Interpreter) evalCompare(c *Compare) (Object, error) {
+	left, err := i.eval(c.Left)
+	if err != nil {
+		return nil, err
+	}
+	prev := left
+	for k, op := range c.Ops {
+		right, err := i.eval(c.Comps[k])
+		if err != nil {
+			return nil, err
+		}
+		res, err := applyCompare(op, prev, right)
+		if err != nil {
+			return nil, err
+		}
+		b, ok := res.(bool)
+		if !ok || !b {
+			return res, nil
+		}
+		prev = right
+	}
+	return true, nil
+}
+
+func applyCompare(op string, l, r Object) (Object, error) {
+	switch op {
+	case "==":
+		return objectsEqual(l, r), nil
+	case "!=":
+		return !objectsEqual(l, r), nil
+	case "in":
+		return contains(l, r)
+	case "not in":
+		v, err := contains(l, r)
+		if err != nil {
+			return nil, err
+		}
+		return !v, nil
+	case "is":
+		return sameObject(l, r), nil
+	case "is not":
+		return !sameObject(l, r), nil
+	case "<", "<=", ">", ">=":
+		c, ok := compareValues(l, r)
+		if !ok {
+			return nil, newExc("TypeError", "'%s' 与 '%s' 之间不支持 '%s'", typeName(l), typeName(r), op)
+		}
+		switch op {
+		case "<":
+			return c < 0, nil
+		case "<=":
+			return c <= 0, nil
+		case ">":
+			return c > 0, nil
+		case ">=":
+			return c >= 0, nil
+		}
+	}
+	return nil, newExc("SyntaxError", "未知的比较运算符 %s", op)
+}
+
+func sameObject(a, b Object) bool {
+	switch a.(type) {
+	case *List, *Tuple, *Dict, *Set, *Instance, *Function, *Class, *Module, *PyNone:
+		return a == b
+	}
+	return objectsEqual(a, b)
+}
+
+func (i *Interpreter) evalFString(f *FStrLit) (Object, error) {
+	var sb strings.Builder
+	for _, p := range f.Parts {
+		if p.Value == nil {
+			sb.WriteString(p.Text)
+			continue
+		}
+		v, err := i.eval(p.Value)
+		if err != nil {
+			return nil, err
+		}
+		if p.Spec != "" {
+			target := v
+			if p.Conv == "r" {
+				target = Repr(v)
+			}
+			s, ferr := applyFormatSpec(target, p.Spec)
+			if ferr != nil {
+				return nil, ferr
+			}
+			sb.WriteString(s)
+			continue
+		}
+		if p.Conv == "r" {
+			sb.WriteString(Repr(v))
+		} else {
+			sb.WriteString(Str(v))
+		}
+	}
+	return sb.String(), nil
+}
+
+// ---------- 推导式 ----------
+
+func (i *Interpreter) evalListComp(lc *ListComp) (Object, error) {
+	out := &List{}
+	err := i.runComp(lc.Clauses, 0, func() error {
+		v, err := i.eval(lc.Elem)
+		if err != nil {
+			return err
+		}
+		out.Items = append(out.Items, v)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (i *Interpreter) evalDictComp(dc *DictComp) (Object, error) {
+	out := NewDict()
+	err := i.runComp(dc.Clauses, 0, func() error {
+		k, err := i.eval(dc.Key)
+		if err != nil {
+			return err
+		}
+		v, err := i.eval(dc.Value)
+		if err != nil {
+			return err
+		}
+		out.Set(k, v)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// runComp 递归展开推导式的多层 for 与 if，并在独立作用域中绑定循环变量
+func (i *Interpreter) runComp(clauses []CompClause, depth int, emit func() error) error {
+	if depth >= len(clauses) {
+		return emit()
+	}
+	c := clauses[depth]
+	iterVal, err := i.eval(c.Iter)
+	if err != nil {
+		return err
+	}
+	items, err := iterate(iterVal)
+	if err != nil {
+		return err
+	}
+	saved := i.env
+	i.env = NewEnvironment(i.env)
+	defer func() { i.env = saved }()
+	for _, item := range items {
+		if err := i.bindTargets(c.Targets, item); err != nil {
+			return err
+		}
+		ok := true
+		for _, cond := range c.Ifs {
+			cv, err := i.eval(cond)
+			if err != nil {
+				return err
+			}
+			if !truthy(cv) {
+				ok = false
+				break
+			}
+		}
+		if !ok {
+			continue
+		}
+		if err := i.runComp(clauses, depth+1, emit); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ---------- 下标与切片 ----------
+
+func (i *Interpreter) getItem(obj, key Object) (Object, error) {
+	switch x := obj.(type) {
+	case *List:
+		n, ok := intVal(key)
+		if !ok {
+			return nil, newExc("TypeError", "列表下标必须是整数，实际为 '%s'", typeName(key))
+		}
+		if n < 0 {
+			n += len(x.Items)
+		}
+		if n < 0 || n >= len(x.Items) {
+			return nil, newExc("IndexError", "list index out of range")
+		}
+		return x.Items[n], nil
+	case *Tuple:
+		n, ok := intVal(key)
+		if !ok {
+			return nil, newExc("TypeError", "元组下标必须是整数，实际为 '%s'", typeName(key))
+		}
+		if n < 0 {
+			n += len(x.Items)
+		}
+		if n < 0 || n >= len(x.Items) {
+			return nil, newExc("IndexError", "tuple index out of range")
+		}
+		return x.Items[n], nil
+	case string:
+		n, ok := intVal(key)
+		if !ok {
+			return nil, newExc("TypeError", "字符串下标必须是整数，实际为 '%s'", typeName(key))
+		}
+		runes := []rune(x)
+		if n < 0 {
+			n += len(runes)
+		}
+		if n < 0 || n >= len(runes) {
+			return nil, newExc("IndexError", "string index out of range")
+		}
+		return string(runes[n]), nil
+	case *Dict:
+		if v, ok := x.Get(key); ok {
+			return v, nil
+		}
+		return nil, newExc("KeyError", "%s", Repr(key))
+	case *Range:
+		n, ok := intVal(key)
+		if !ok {
+			return nil, newExc("TypeError", "range 下标必须是整数")
+		}
+		length := x.Len()
+		if n < 0 {
+			n += length
+		}
+		if n < 0 || n >= length {
+			return nil, newExc("IndexError", "range object index out of range")
+		}
+		return x.At(n), nil
+	}
+	return nil, newExc("TypeError", "'%s' 对象不支持下标访问", typeName(obj))
+}
+
+func (i *Interpreter) sliceObject(obj Object, start, stop, step Object) (Object, error) {
+	switch x := obj.(type) {
+	case *List:
+		idx, err := sliceIndices(len(x.Items), start, stop, step)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]Object, len(idx))
+		for k, n := range idx {
+			out[k] = x.Items[n]
+		}
+		return &List{Items: out}, nil
+	case *Tuple:
+		idx, err := sliceIndices(len(x.Items), start, stop, step)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]Object, len(idx))
+		for k, n := range idx {
+			out[k] = x.Items[n]
+		}
+		return &Tuple{Items: out}, nil
+	case string:
+		runes := []rune(x)
+		idx, err := sliceIndices(len(runes), start, stop, step)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]rune, len(idx))
+		for k, n := range idx {
+			out[k] = runes[n]
+		}
+		return string(out), nil
+	case *Range:
+		items, err := iterate(x)
+		if err != nil {
+			return nil, err
+		}
+		idx, err := sliceIndices(len(items), start, stop, step)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]Object, len(idx))
+		for k, n := range idx {
+			out[k] = items[n]
+		}
+		return &List{Items: out}, nil
+	}
+	return nil, newExc("TypeError", "'%s' 对象不支持切片", typeName(obj))
+}
+
+// ---------- 属性访问 ----------
+
+func builtinMethodExists(typeStr, name string) bool {
+	switch typeStr {
+	case "str":
+		_, ok := strMethods[name]
+		return ok
+	case "list":
+		_, ok := listMethods[name]
+		return ok
+	case "dict":
+		_, ok := dictMethods[name]
+		return ok
+	case "tuple":
+		_, ok := tupleMethods[name]
+		return ok
+	case "set":
+		_, ok := setMethods[name]
+		return ok
+	}
+	return false
+}
+
+func getAttr(obj Object, name string) (Object, error) {
+	switch x := obj.(type) {
+	case *Instance:
+		if v, ok := x.Fields[name]; ok {
+			return v, nil
+		}
+		if fn, ok := x.Class.LookupMethod(name); ok {
+			return &Method{Recv: obj, Fn: fn}, nil
+		}
+		if v, ok := x.Class.LookupAttr(name); ok {
+			return v, nil
+		}
+		return nil, newExc("AttributeError", "'%s' 对象没有属性 '%s'", x.Class.Name, name)
+	case *Module:
+		if v, ok := x.Attrs[name]; ok {
+			return v, nil
+		}
+		return nil, newExc("AttributeError", "module '%s' 没有属性 '%s'", x.Name, name)
+	case *Class:
+		if fn, ok := x.LookupMethod(name); ok {
+			return fn, nil
+		}
+		if v, ok := x.LookupAttr(name); ok {
+			return v, nil
+		}
+		return nil, newExc("AttributeError", "type object '%s' 没有属性 '%s'", x.Name, name)
+	case *PyException:
+		switch name {
+		case "args":
+			return &Tuple{Items: []Object{x.Msg}}, nil
+		case "__class__":
+			return &PyType{Name: x.ExcType}, nil
+		}
+		return nil, newExc("AttributeError", "'%s' 对象没有属性 '%s'", x.ExcType, name)
+	}
+	if builtinMethodExists(typeName(obj), name) {
+		return &BuiltinMethod{Recv: obj, Name: name}, nil
+	}
+	return nil, newExc("AttributeError", "'%s' 对象没有属性 '%s'", typeName(obj), name)
+}
+
+// ---------- 调用 ----------
+
+func (i *Interpreter) evalCall(c *Call) (Object, error) {
+	var args []Object
+	kwargs := map[string]Object{}
+	for _, a := range c.Args {
+		v, err := i.eval(a.Value)
+		if err != nil {
+			return nil, err
+		}
+		if a.Name != "" {
+			kwargs[a.Name] = v
+		} else {
+			args = append(args, v)
+		}
+	}
+	fn, err := i.eval(c.Func)
+	if err != nil {
+		return nil, err
+	}
+	return i.callObject(fn, args, kwargs)
+}
+
+// callObject 统一分发所有可调用对象
+func callObject(fn Object, args []Object, kwargs map[string]Object) (Object, error) {
+	if activeInterp == nil {
+		return nil, newExc("RuntimeError", "解释器尚未初始化")
+	}
+	return activeInterp.callObject(fn, args, kwargs)
+}
+
+// callObjectRef 是 callObject 的间接引用。builtins.go 中的包级变量
+// （方法表、内置函数表）通过它调用用户函数，从而避免包级初始化循环。
+var callObjectRef func(fn Object, args []Object, kwargs map[string]Object) (Object, error)
+
+func init() {
+	callObjectRef = callObject
+}
+
+func (i *Interpreter) callObject(fn Object, args []Object, kwargs map[string]Object) (Object, error) {
+	switch f := fn.(type) {
+	case *Function:
+		return i.callFunction(f, args, kwargs)
+	case *Builtin:
+		return f.Fn(args, kwargs)
+	case *Method:
+		all := make([]Object, 0, len(args)+1)
+		all = append(all, f.Recv)
+		all = append(all, args...)
+		return i.callFunction(f.Fn, all, kwargs)
+	case *BuiltinMethod:
+		return callBuiltinMethod(f.Recv, f.Name, args, kwargs)
+	case *Class:
+		return i.instantiate(f, args, kwargs)
+	case *PyType:
+		if isExceptionTypeName(f.Name) {
+			msg := ""
+			if len(args) > 0 {
+				msg = Str(args[0])
+			}
+			return nil, &PyException{ExcType: f.Name, Msg: msg}
+		}
+		if b, ok := builtinFuncs[strings.ToLower(f.Name)]; ok {
+			return b(args, kwargs)
+		}
+		return nil, newExc("TypeError", "'%s' 对象不可调用", f.Name)
+	}
+	return nil, newExc("TypeError", "'%s' 对象不可调用", typeName(fn))
+}
+
+func (i *Interpreter) callFunction(fn *Function, args []Object, kwargs map[string]Object) (Object, error) {
+	if i.callDepth >= 200 {
+		return nil, newExc("RecursionError", "超过最大递归深度")
+	}
+	local := NewEnvironment(fn.Env)
+	pi := 0
+	for idx, p := range fn.Params {
+		if p.Star || p.Star2 {
+			continue
+		}
+		if pi < len(args) {
+			if _, ok := kwargs[p.Name]; ok {
+				return nil, newExc("TypeError", "%s() 的参数 '%s' 同时收到了位置值与关键字值", fn.Name, p.Name)
+			}
+			local.Set(p.Name, args[pi])
+			pi++
+			continue
+		}
+		// 关键字参数优先于默认值
+		if v, ok := kwargs[p.Name]; ok {
+			local.Set(p.Name, v)
+			continue
+		}
+		if idx < len(fn.Defaults) && fn.Defaults[idx] != nil {
+			local.Set(p.Name, fn.Defaults[idx])
+			continue
+		}
+		return nil, newExc("TypeError", "%s() 缺少必要的位置参数: '%s'", fn.Name, p.Name)
+	}
+	hasStar := false
+	for _, p := range fn.Params {
+		if p.Star {
+			hasStar = true
+			rest := make([]Object, 0)
+			for ; pi < len(args); pi++ {
+				rest = append(rest, args[pi])
+			}
+			local.Set(p.Name, &List{Items: rest})
+		} else if p.Star2 {
+			d := NewDict()
+			for k, v := range kwargs {
+				d.Set(k, v)
+			}
+			local.Set(p.Name, d)
+		}
+	}
+	if pi < len(args) && !hasStar {
+		return nil, newExc("TypeError", "%s() 只接受 %d 个位置参数，但传入了 %d 个", fn.Name, pi, len(args))
+	}
+	saved := i.env
+	i.env = local
+	i.callDepth++
+	sig, err := i.execBlock(fn.Body)
+	i.callDepth--
+	i.env = saved
+	if err != nil {
+		return nil, err
+	}
+	if sig != nil && sig.kind == sigReturn {
+		return sig.val, nil
+	}
+	return None, nil
+}

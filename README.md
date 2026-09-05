@@ -1,166 +1,153 @@
-# gopy - Go 语言 Python 脚本解释器
+# gopy - Go 语言实现的 Python 子集解释器
 
-本项目实现一个轻量级的 Python 子集解释器，使用 Go 语言编写。核心实现集中在 `main.go`（词法 / 表达式引擎 / 语句执行），支持 Python 常见语法子集，可用于学习解释器原理或快速原型验证。
+用 Go 编写的 Python 子集解释器，采用标准的 **词法 → 语法（AST）→ 树遍历求值** 三段式架构。
+以 `python3` 的输出为基准做 TDD 回归验证，可用于学习解释器原理或做轻量脚本原型。
 
 ## 目录结构
 
 ```
 gopy/
 ├── go.mod
-├── main.go          # 入口 + 词法/表达式引擎 + 语句执行引擎（核心）
-├── lexer.go         # 早期词法分析器（保留）
-├── parser.go        # 早期语法分析器（保留）
-├── interpreter.go   # 早期求值器（保留）
-├── example.py       # 示例脚本
-├── tests/
-│   ├── 1.py         # 算术与 print 多参数
-│   ├── 2.py         # 字符串拼接与 str()
-│   ├── 3.py         # 代数/逻辑/条件/字符串四类语法
-│   ├── 4.py         # for+range / while / def+return / 列表操作
-│   ├── 5.py         # break/continue / 字典 / 切片 / for...in list
-│   ├── 6.py         # 字典方法 / 负数索引 / 切片步长 / pop / sort
-│   └── 7.py         # 类与对象 / try-except 异常处理 / import math
-└── README.md
+├── main.go          # CLI 入口
+├── lexer.go         # 词法分析：缩进 INDENT/DEDENT、f-string、注释、括号续行
+├── ast.go           # AST 节点定义（语句 / 表达式）
+├── parser.go        # 递归下降语法分析器
+├── objects.go       # 运行时对象、作用域链、repr/str、运算符与切片语义
+├── builtins.go      # 内置函数、内建类型方法、math/os/sys 模块
+├── interpreter.go   # 树遍历求值器（控制流、异常、类、推导式）
+├── example.py       # 综合示例
+├── tests/           # 回归用例，1~7 为基础语法，8~11 为进阶特性
+└── test.sh          # 与 python3 输出逐文件 diff
 ```
 
-## 环境要求
-
-- Go 1.21 或更高（当前环境 go1.25.5）
-- macOS / Linux / Windows
-- 对比测试需要 `python3`
-
-## 构建
+## 构建与运行
 
 ```bash
-cd /Users/kimmking/WorkBuddy/kimmking/gopy
 go build -o gopy .
-```
-
-## 运行
-
-```bash
 ./gopy example.py
 # 或
-go run . example.py
-./gopy path/to/your_script.py
+go run . path/to/script.py
 ```
 
-## 已支持的 Python 语法
-
-**数据与运算**
-- 变量赋值：`name = expr`
-- 数字：`int` / `float`（`/` 恒返回 float，输出带 `.0`）
-- 字符串：`"..."` / `'...'`，`+` 拼接
-- 运算符优先级：`* /` 高于 `+ -`（调度场算法 + 逆波兰求值）
-- 比较与逻辑：`> < >= <= == !=`、`and` / `or` / `not`
-- 布尔字面量：`True` / `False`（输出 `True` / `False`）
-
-**控制流**
-- `if` / `elif` / `else`（基于缩进的块）
-- `for x in range(n)` / `range(a, b)`
-- `while cond:`
-- `break` / `continue`（在 for / while 内生效）
-- `def name(args):` + `return`（含函数内循环、参数绑定、局部作用域）
-
-**字符串、列表与字典**
-- f-string：`f"a={a}, b={b}"`
-- 字符串方法：`strip()` / `upper()` / `lower()` / `split(sep)` / `sep.join(list)`
-- 列表字面量 `[1, 2, 3]`、索引 `nums[0]`（支持负数 `nums[-1]`）、`len(list)`、`list.append(x)`
-- `for x in list:` 直接遍历列表元素（也可遍历 `range()`）
-- 切片：列表 `letters[1:3]` / `[:2]` / `[3:]` / `letters[::2]` / `letters[1:5:2]`，字符串同理（支持负数索引与步长）
-- 列表原地方法：`list.sort()`、`list.pop()`
-- 字典：`{"k": v}` 字面量、`d["k"]` 取值、`d["k"] = v` 赋值、`len(d)`（保持插入顺序）
-- 字典方法：`d.keys()` / `d.values()` / `d.items()`（元组输出 `('a', 1)`）
-
-**类与对象**
-- `class Name:` 定义类，`def __init__(self, ...)` 构造器，`self.x = ...` 属性赋值
-- 实例化 `obj = Name(args)`，`obj.attr` 读属性，`obj.method()` 调方法（`self` 自动绑定）
-- 方法内可通过 `self.other()` 互相调用，`self.x` 在方法间共享
-
-**异常处理**
-- `try:` / `except:` 捕获运行时错误（如除零 `1 / 0`）；try 块抛错时跳到 except 块执行
-- 未捕获的运行时错误由顶层 `recover` 兜底，不会导致解释器崩溃
-
-**import 模块**
-- `import math`：内置 `math.floor(x)` / `math.sqrt(x)` / `math.pi`
-
-**内置函数**
-- `print(...)` 多参数（空格分隔）、`str()`、`len()`、`range()`、`list()`
-
-## 测试（TDD：以 python3 输出为基准）
-
-每个测试文件都用 `python3` 执行结果作为基准，再与 `gopy` 输出逐行 diff：
+回归测试（需要 `python3`）：
 
 ```bash
-cd /Users/kimmking/WorkBuddy/kimmking/gopy
-go build -o gopy .
-for f in tests/1.py tests/2.py tests/3.py tests/4.py tests/5.py tests/6.py tests/7.py example.py; do
-  if diff <(python3 "$f") <(./gopy "$f") > /dev/null; then
-    echo "$f ✓ 一致"
-  else
-    echo "$f ✗ 不一致"; diff <(python3 "$f") <(./gopy "$f")
-  fi
-done
+./test.sh
 ```
 
-当前状态：八个文件 **全部与 python3 输出完全一致**。
+当前状态：`tests/1~11.py` 与 `example.py` **全部与 python3 输出完全一致**。
 
-| 测试文件 | 覆盖点 |
-|---|---|
-| `tests/1.py` | 算术、print 多参数 |
-| `tests/2.py` | 字符串拼接、`str()` |
-| `tests/3.py` | 代数运算优先级、逻辑运算、if/elif/else、字符串方法与 f-string |
-| `tests/4.py` | for+range、while、def+return、列表字面量/索引/len/append |
-| `tests/5.py` | break/continue、字典、切片、for...in list |
-| `tests/6.py` | 字典方法 keys/values/items、负数索引、切片步长 `[::2]`、`list.pop()` / `sort()` |
-| `tests/7.py` | 类与对象、`try/except` 异常处理、`import math` |
-| `example.py` | 综合示例 |
-
-### tests/4.py 基准输出（python3）
+## 架构说明
 
 ```
-for 循环:
-i = 0
-i = 1
-i = 2
-1到4求和: 10
-while 循环:
-count = 3
-count = 2
-count = 1
-add(3, 4) = 7
-Hello, KimmKing
-列表: [10, 20, 30]
-长度: 3
-第一个: 10
-追加后: [10, 20, 30, 40]
-sum_to(5) = 15
+源码 → Tokenize()     词法分析，产出 token 流（含 INDENT / DEDENT）
+     → Parse()        递归下降解析，产出 AST
+     → Interpreter    树遍历求值（Environment 作用域链 + signal 控制流）
 ```
 
-## 实现要点
+### 1. 词法分析（`lexer.go`）
 
-- 语句执行：源码先按缩进解析为 `stmt` 列表，再用 `execStmts` 递归执行；`for` / `while` 重复执行子块，`def` 注册函数体，调用时切换局部 `env`。
-- 表达式求值：`tokenize` → 调度场（shunting-yard）→ 逆波兰（RPN）求值。
-- `str(...)` 通过 `inlineStrCalls` 内联为字符串字面量，使 `"x + y = " + str(x + y)` 这类混合表达式回落表达式引擎。
-- 列表用 `[]interface{}` 表示，`formatValue` 输出 Python 风格（`[10, 20, 30]`；字符串元素带引号）。
-- 控制流信号：`execStmts` 返回 `flowKind`（normal / break / continue / return / error），循环据此响应 break/continue，函数用 `retVal` 传递返回值。
-- 字典用有序结构 `Dict{keys, vals}`：Go 原生 map 无序，无法还原 Python 3.7+ 的插入顺序，必须单独维护 key 顺序才能保证 print 输出一致。
-- 类与对象：`ClassDef` 记录方法体，`Instance` 用 `fields` 存属性；实例化时调用 `__init__`，`callMethodOn` 把 `self` 绑定到实例并跳过 `self` 形参，属性读写经 `env["self"]` 落到 `Instance.fields`。
-- 异常处理：`try` 块用独立的 `execStmts` 子调用执行；运行时错误（如除零）通过 `panic(runtimeError)` 抛出，`execStmts` 顶层 `recover` 捕获并转为 `flowError` 信号，交由 `except` 块处理；未捕获则顶层兜底，解释器不崩溃。
-- 调用结果内联：`inlineCalls` 把参与运算的调用（如 `self.double() * 2`、`len(x) + 1`）求值后替换为字面量，再回落表达式引擎，避免调用分支吞掉外围运算符。
-- 点号处理：`tokenize` 让 `obj.attr` / `math.floor` / `3.7` 保持为单个 token，`resolveToken` 负责实例属性与模块常量解析。
+- 缩进敏感：维护缩进栈，产出 `INDENT` / `DEDENT`，缩进不一致时报 `SyntaxError`。
+- 括号内换行被忽略，天然支持隐式续行；同时支持反斜杠显式续行。
+- 行尾 `#` 注释在词法阶段剥离，因此 `x = 1  # 注释` 不会被当成表达式的一部分。
+- 字符串支持三引号与转义序列；f-string 保留 RAW 内容，交由 parser 切分插值表达式。
+- 支持 `0x` 十六进制、科学计数法、多字符运算符（`**` `//` `<<` `>>` `+=` 等）。
 
-## 下一步可扩展
+### 2. 语法分析（`parser.go`）
 
-更多内置模块（`random` / `datetime`）、`except` 指定异常类型、`raise` 主动抛错、继承、列表/字典推导式、lambda 表达式、关键字参数。
+递归下降，优先级由低到高：
+
+```
+or < and < not < 比较(含 in/is) < | < ^ < & < 移位 < +- < */ // % < 一元 < ** < 后缀 < 原子
+```
+
+关键点：`not` 的层级低于比较运算，因此 `not a == b` 解析为 `not (a == b)`，与 Python 一致。
+`for` / 推导式的迭代目标使用受限的 `parseTarget()`，避免 `in` 被误判为成员运算符。
+
+### 3. 求值（`interpreter.go` + `objects.go`）
+
+- **作用域链**：`Environment` 单向链表，赋值在当前作用域建立绑定（Python 语义），读取沿链向上查找。函数闭包捕获定义时的 `Env`。
+- **控制流信号**：`return` / `break` / `continue` 通过 `signal` 逐层返回，不再使用共享字段，因此递归调用的返回值不会互相覆盖。
+- **异常**：运行时错误统一为 `*PyException`（实现 `error` 接口），`try/except` 按类型匹配捕获，支持 `except X as e`、`else`、`finally`、`raise`。
+- **对象模型**：基础值直接用 Go 原生类型（`int` / `float64` / `bool` / `string`），容器与可调用对象用指针类型（`*List` / `*Dict` / `*Function` / `*Instance` ...），天然具备引用语义。
+- **字典与集合**：以 `keyOf()` 归一化键（数值按值归一化，故 `1` 与 `1.0` 同键），并单独维护插入顺序以还原 Python 3.7+ 的有序语义。
+
+## 已支持的语法
+
+**数据与运算**
+
+- `int` / `float` / `bool` / `str` / `None`；`/` 恒返回 float
+- 运算符：`+ - * / // % **`、比较 `> < >= <= == !=`、链式比较 `1 < x < 10`
+- 逻辑：`and` / `or` / `not`（短路求值）；位运算 `& | ^ ~ << >>`
+- 成员与身份：`in` / `not in` / `is` / `is not`
+- 增量赋值 `+= -= *= /= //= %= **=`，链式赋值 `a = b = 1`，元组解包（含嵌套）
+- 序列运算：字符串/列表/元组拼接，`str * n` 与 `list * n` 重复
+
+**控制流**
+
+- `if` / `elif` / `else`、`while ... else`、`for ... in ... else`
+- `break` / `continue` / `pass`
+- 遍历目标：list / tuple / str / dict（键）/ set / range
+
+**函数**
+
+- `def` 定义，位置参数、默认参数、关键字参数、`*args`、`**kwargs`
+- 递归、闭包、嵌套函数、作用域隔离
+- `lambda` 与 `map` / `filter` / `sorted(key=...)` 等高阶函数
+
+**字符串、列表、字典、集合、元组**
+
+- f-string：插值、转换符 `!r` `!s`、格式说明符（宽度/对齐/精度/`d x b o e f g %`）
+- 字符串：`upper lower capitalize title swapcase strip lstrip rstrip split rsplit splitlines join startswith endswith find rfind index count replace isdigit isalpha isalnum isspace isupper islower ljust rjust center zfill`
+- 列表：`append extend insert remove pop clear index count sort(key/reverse) reverse copy`
+- 字典：`keys values items get pop setdefault update clear copy`（保持插入顺序）
+- 集合：`add remove discard clear copy union intersection difference`
+- 元组：`count index`
+- 切片：完整 Python 语义，支持负数下标、负步长（`s[::-1]`）、越界截断
+
+**类与对象**
+
+- `class` 定义、`__init__` 构造、`self` 自动绑定
+- 单继承（方法沿父链查找）、`isinstance`、类属性
+- `print(obj)` 优先调用 `__str__`，否则输出 `<Dog object at 0x...>`
+
+**推导式**
+
+- 列表推导式、字典推导式，支持多层 `for` 与 `if` 过滤，且拥有独立作用域
+
+**异常处理**
+
+- `try` / `except` / `except X as e` / `else` / `finally`
+- `raise ValueError("msg")`、`assert`
+- 内建异常类型：`ValueError TypeError IndexError KeyError ZeroDivisionError NameError AttributeError RuntimeError AssertionError NotImplementedError RecursionError ...`
+- 未捕获的异常输出到 stderr 并以非零码退出，解释器本身不崩溃
+
+**模块**
+
+- `import math` / `import os` / `import sys`，支持 `import x as y`、`from x.y import z`
+- `math`：`floor ceil trunc sqrt fabs exp log log10 log2 pow hypot sin cos tan asin acos atan atan2 degrees radians fmod copysign modf factorial gcd`，常量 `pi e tau inf nan`
+- `os`：`getcwd listdir getpid name sep`，以及 `os.path.join exists isfile isdir basename dirname abspath splitext`
+- `sys`：`argv version platform exit`
+
+**内置函数**
+
+`print len str repr type int float bool list tuple dict set range abs round pow divmod min max sum sorted reversed enumerate zip map filter any all chr ord hex oct bin isinstance hasattr getattr setattr id input exit`
+
+## 实现要点与已知取舍
+
+- **`math.Degrees` / `math.Radians`**：Go 标准库没有这两个函数，按定义 `f * (180 / π)`、`f * (π / 180)` 换算；系数先算再乘，与 CPython 结果逐位一致。
+- **包级初始化循环**：`Repr` 需要调用实例 `__str__`，而求值器又依赖方法表。通过 `instanceStrHook` 与 `callObjectRef` 两个函数变量间接引用来打破循环。
+- **UTF-8**：词法分析按字节扫描，多字节字符必须原样输出（`string([]byte{c})`），不能走 `string(c)` 的 code point 转换，否则中文会变成乱码。
+- **尚未实现**：`with` 语句、生成器与 `yield`、`str.format`、装饰器、多继承、关键字-only 参数、`global` 之外的 `nonlocal`、模块文件导入（只能导入内置模块）。
+- 数字使用 Go `int` / `float64`，因此没有 Python 的任意精度整数。
 
 ## 常见问题
 
-Q: 运行报错 `read error`
-A: 检查脚本路径是否正确，且文件可读。
-
 Q: 输出与 python3 不一致？
-A: 用上面的 for 循环 diff 定位，按 TDD 方式补全解释器能力（不要修改测试文件）。
+A: 用 `./test.sh` 定位到具体文件，按 TDD 方式补全解释器能力（不要修改测试文件）。
+
+Q: 运行时报 `SyntaxError`？
+A: 检查是否使用了"尚未实现"中列出的语法。
 
 ## 作者
 
