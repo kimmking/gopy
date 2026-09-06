@@ -395,7 +395,139 @@ var strMethods = map[string]MethodFn{
 		return out, nil
 	},
 	"format": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
-		return nil, newExc("NotImplementedError", "str.format 尚未实现，请使用 f-string")
+		return formatString(recv.(string), args, kwargs)
+	},
+	"partition": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, argCountErr("partition", len(args), 1)
+		}
+		sep, ok := args[0].(string)
+		if !ok {
+			return nil, newExc("TypeError", "partition() 需要字符串分隔符")
+		}
+		s := recv.(string)
+		idx := strings.Index(s, sep)
+		if idx < 0 {
+			return &Tuple{Items: []Object{s, "", ""}}, nil
+		}
+		return &Tuple{Items: []Object{s[:idx], sep, s[idx+len(sep):]}}, nil
+	},
+	"rpartition": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, argCountErr("rpartition", len(args), 1)
+		}
+		sep, ok := args[0].(string)
+		if !ok {
+			return nil, newExc("TypeError", "rpartition() 需要字符串分隔符")
+		}
+		s := recv.(string)
+		idx := strings.LastIndex(s, sep)
+		if idx < 0 {
+			return &Tuple{Items: []Object{s, "", ""}}, nil
+		}
+		return &Tuple{Items: []Object{s[:idx], sep, s[idx+len(sep):]}}, nil
+	},
+	"istitle": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		s := recv.(string)
+		title := false
+		inWord := false
+		for _, r := range s {
+			if unicode.IsLetter(r) {
+				if !inWord {
+					if !unicode.IsUpper(r) {
+						return false, nil
+					}
+					inWord = true
+					title = true
+				} else if !unicode.IsLower(r) {
+					return false, nil
+				}
+			} else {
+				inWord = false
+			}
+		}
+		return title, nil
+	},
+	"isnumeric": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		s := recv.(string)
+		if s == "" {
+			return false, nil
+		}
+		for _, r := range s {
+			if !unicode.IsDigit(r) {
+				return false, nil
+			}
+		}
+		return true, nil
+	},
+	"isdecimal": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		s := recv.(string)
+		if s == "" {
+			return false, nil
+		}
+		for _, r := range s {
+			if !unicode.IsDigit(r) {
+				return false, nil
+			}
+		}
+		return true, nil
+	},
+	"casefold": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		return strings.ToLower(recv.(string)), nil
+	},
+	"removeprefix": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, argCountErr("removeprefix", len(args), 1)
+		}
+		p, ok := args[0].(string)
+		if !ok {
+			return nil, newExc("TypeError", "removeprefix() 需要字符串参数")
+		}
+		s := recv.(string)
+		if strings.HasPrefix(s, p) {
+			return s[len(p):], nil
+		}
+		return s, nil
+	},
+	"removesuffix": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, argCountErr("removesuffix", len(args), 1)
+		}
+		p, ok := args[0].(string)
+		if !ok {
+			return nil, newExc("TypeError", "removesuffix() 需要字符串参数")
+		}
+		s := recv.(string)
+		if strings.HasSuffix(s, p) {
+			return s[:len(s)-len(p)], nil
+		}
+		return s, nil
+	},
+	"expandtabs": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		tab := 8
+		if len(args) >= 1 {
+			if t, ok := intVal(args[0]); ok {
+				tab = t
+			}
+		}
+		s := recv.(string)
+		var sb strings.Builder
+		col := 0
+		for _, r := range s {
+			if r == '\t' {
+				n := tab - col%tab
+				sb.WriteString(strings.Repeat(" ", n))
+				col += n
+			} else {
+				sb.WriteRune(r)
+				if r == '\n' {
+					col = 0
+				} else {
+					col++
+				}
+			}
+		}
+		return sb.String(), nil
 	},
 }
 
@@ -879,42 +1011,11 @@ var builtinFuncs = map[string]BuiltinFn{
 		return &PyType{Name: typeName(args[0])}, nil
 	},
 	"int": func(args []Object, kwargs map[string]Object) (Object, error) {
-		if len(args) == 0 {
-			return 0, nil
-		}
-		v := args[0]
-		base := 10
-		if len(args) >= 2 {
-			b, ok := intVal(args[1])
-			if !ok {
-				return nil, newExc("TypeError", "int() 的进制必须是整数")
-			}
-			base = b
-		}
-		switch x := v.(type) {
-		case int:
-			return x, nil
-		case bool:
-			if x {
-				return 1, nil
-			}
-			return 0, nil
-		case float64:
-			if math.IsNaN(x) || math.IsInf(x, 0) {
-				return nil, newExc("ValueError", "cannot convert float %s to integer", formatFloat(x))
-			}
-			return int(x), nil
-		case string:
-			s := strings.TrimSpace(x)
-			if n, err := strconv.ParseInt(s, base, 64); err == nil {
-				return int(n), nil
-			}
-			if f, err := strconv.ParseFloat(s, 64); err == nil && base == 10 {
-				return int(f), nil
-			}
-			return nil, newExc("ValueError", "invalid literal for int() with base %d: %s", base, Repr(x))
-		}
-		return nil, newExc("TypeError", "int() 参数无法转换为整数: '%s'", typeName(v))
+		return convertToInt(args)
+	},
+	// long 兼容 Python 2 的长整型转换；在本解释器中与 int 等价
+	"long": func(args []Object, kwargs map[string]Object) (Object, error) {
+		return convertToInt(args)
 	},
 	"float": func(args []Object, kwargs map[string]Object) (Object, error) {
 		if len(args) == 0 {
@@ -1328,21 +1429,21 @@ var builtinFuncs = map[string]BuiltinFn{
 		if err != nil {
 			return nil, err
 		}
-		return "0x" + strconv.FormatInt(int64(n), 16), nil
+		return formatRadix(n, "0x", 16), nil
 	},
 	"oct": func(args []Object, kwargs map[string]Object) (Object, error) {
 		n, err := requireInt("oct", args)
 		if err != nil {
 			return nil, err
 		}
-		return "0o" + strconv.FormatInt(int64(n), 8), nil
+		return formatRadix(n, "0o", 8), nil
 	},
 	"bin": func(args []Object, kwargs map[string]Object) (Object, error) {
 		n, err := requireInt("bin", args)
 		if err != nil {
 			return nil, err
 		}
-		return "0b" + strconv.FormatInt(int64(n), 2), nil
+		return formatRadix(n, "0b", 2), nil
 	},
 	"isinstance": func(args []Object, kwargs map[string]Object) (Object, error) {
 		if len(args) != 2 {
@@ -1431,6 +1532,53 @@ func requireInt(name string, args []Object) (int, error) {
 		return 0, newExc("TypeError", "%s() 需要整数参数", name)
 	}
 	return n, nil
+}
+
+// formatRadix 按指定进制格式化整数，带前缀（如 0x/0o/0b），与 python 的 hex/oct/bin 一致
+func formatRadix(n int, prefix string, radix int) string {
+	sign := ""
+	if n < 0 {
+		sign = "-"
+		n = -n
+	}
+	return sign + prefix + strconv.FormatInt(int64(n), radix)
+}
+
+// convertToInt 实现 int() / long() 的转换逻辑（支持进制参数）
+func convertToInt(args []Object) (Object, error) {
+	v := args[0]
+	base := 10
+	if len(args) >= 2 {
+		b, ok := intVal(args[1])
+		if !ok {
+			return nil, newExc("TypeError", "int() 的进制必须是整数")
+		}
+		base = b
+	}
+	switch x := v.(type) {
+	case int:
+		return x, nil
+	case bool:
+		if x {
+			return 1, nil
+		}
+		return 0, nil
+	case float64:
+		if math.IsNaN(x) || math.IsInf(x, 0) {
+			return nil, newExc("ValueError", "cannot convert float %s to integer", formatFloat(x))
+		}
+		return int(x), nil
+	case string:
+		s := strings.TrimSpace(x)
+		if n, err := strconv.ParseInt(s, base, 64); err == nil {
+			return int(n), nil
+		}
+		if f, err := strconv.ParseFloat(s, 64); err == nil && base == 10 {
+			return int(f), nil
+		}
+		return nil, newExc("ValueError", "invalid literal for int() with base %d: %s", base, Repr(x))
+	}
+	return nil, newExc("TypeError", "int() 参数无法转换为整数: '%s'", typeName(v))
 }
 
 // isqrtInt 返回不大于 √n 的最大整数（整数平方根）

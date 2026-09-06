@@ -777,6 +777,9 @@ func binaryOp(op string, l, r Object) (Object, error) {
 		return math.Floor(lf / rf), nil
 
 	case "%":
+		if s, ok := l.(string); ok {
+			return percentFormat(s, r)
+		}
 		li, lok := intVal(l)
 		ri, rok := intVal(r)
 		if lok && rok {
@@ -847,12 +850,532 @@ func binaryOp(op string, l, r Object) (Object, error) {
 	return nil, newExc("SyntaxError", "未知运算符 %s", op)
 }
 
+// ============ printf 风格字符串格式化（% 运算符） ============
+
+// padFieldA 按宽度与对齐方式填充字段。
+// align: '<' 左对齐, '>' 右对齐, '^' 居中, '=' 数值符号感知(符号在左、其余补零)。
+// zero 为 true 时以 '0' 填充并做符号感知；否则使用 fill 字符。
+func padFieldA(s string, width int, align byte, fill byte, zero bool) string {
+	if width <= len(s) {
+		return s
+	}
+	pad := width - len(s)
+	switch align {
+	case '<':
+		return s + strings.Repeat(string(fill), pad)
+	case '^':
+		left := pad / 2
+		right := pad - left
+		return strings.Repeat(string(fill), left) + s + strings.Repeat(string(fill), right)
+	case '=':
+		if len(s) > 0 && (s[0] == '-' || s[0] == '+' || s[0] == ' ') {
+			if zero {
+				return s[:1] + strings.Repeat("0", pad) + s[1:]
+			}
+			return s[:1] + strings.Repeat(string(fill), pad) + s[1:]
+		}
+		if zero {
+			return strings.Repeat("0", pad) + s
+		}
+		return strings.Repeat(string(fill), pad) + s
+	default: // '>'
+		if len(s) > 0 && (s[0] == '-' || s[0] == '+' || s[0] == ' ') {
+			if zero {
+				return s[:1] + strings.Repeat("0", pad) + s[1:]
+			}
+			return s[:1] + strings.Repeat(string(fill), pad) + s[1:]
+		}
+		if zero {
+			return strings.Repeat("0", pad) + s
+		}
+		return strings.Repeat(string(fill), pad) + s
+	}
+}
+
+// fmtInt 按给定进制/类型格式化整数
+func fmtInt(iv int, typ byte, sign string, alt bool, align byte, fill byte, zero bool, width int, hasPrec bool, prec int) string {
+	neg := iv < 0
+	mag := iv
+	if neg {
+		mag = -mag
+	}
+	sg := ""
+	if neg {
+		sg = "-"
+	} else if sign == "+" {
+		sg = "+"
+	} else if sign == " " {
+		sg = " "
+	}
+	digits := ""
+	switch typ {
+	case 'd', 'i', 'u':
+		digits = strconv.Itoa(mag)
+	case 'b':
+		digits = strconv.FormatInt(int64(mag), 2)
+	case 'B':
+		digits = strings.ToUpper(strconv.FormatInt(int64(mag), 2))
+	case 'o':
+		digits = strconv.FormatInt(int64(mag), 8)
+	case 'x':
+		digits = strconv.FormatInt(int64(mag), 16)
+	case 'X':
+		digits = strings.ToUpper(strconv.FormatInt(int64(mag), 16))
+	}
+	if hasPrec {
+		for len(digits) < prec {
+			digits = "0" + digits
+		}
+	}
+	if alt && mag != 0 {
+		switch typ {
+		case 'o':
+			digits = "0o" + digits
+		case 'x':
+			digits = "0x" + digits
+		case 'X':
+			digits = "0X" + digits
+		case 'b':
+			digits = "0b" + digits
+		case 'B':
+			digits = "0B" + digits
+		}
+	}
+	return padFieldA(sg+digits, width, align, fill, zero)
+}
+
+// fmtFloat 按给定类型格式化浮点数
+func fmtFloat(fv float64, typ byte, sign string, alt bool, align byte, fill byte, zero bool, width int, hasPrec bool, prec int) string {
+	p := 6
+	if hasPrec {
+		p = prec
+	}
+	var b byte
+	switch typ {
+	case 'f', 'F':
+		b = 'f'
+	case 'e', 'E':
+		b = 'e'
+	case 'g', 'G':
+		b = 'g'
+	}
+	s := strconv.FormatFloat(fv, b, p, 64)
+	if typ == 'F' || typ == 'E' || typ == 'G' {
+		s = strings.ToUpper(s)
+	}
+	if fv >= 0 {
+		if sign == "+" {
+			s = "+" + s
+		} else if sign == " " {
+			s = " " + s
+		}
+	}
+	return padFieldA(s, width, align, fill, zero)
+}
+
+func isAlign(b byte) bool {
+	return b == '<' || b == '>' || b == '^' || b == '='
+}
+
+func isDigitByte(b byte) bool {
+	return b >= '0' && b <= '9'
+}
+
+// percentFormat 实现 str % args 的 printf 风格格式化
+func percentFormat(format string, arg Object) (Object, error) {
+	var args []Object
+	var mapping *Dict
+	switch a := arg.(type) {
+	case *Tuple:
+		args = a.Items
+	case *List:
+		args = a.Items
+	case *Dict:
+		mapping = a
+	default:
+		args = []Object{arg}
+	}
+	var sb strings.Builder
+	i, n := 0, len(format)
+	idx := 0
+	for i < n {
+		c := format[i]
+		if c != '%' {
+			sb.WriteByte(c)
+			i++
+			continue
+		}
+		i++
+		if i >= n {
+			return nil, newExc("ValueError", "格式字符串中 %% 后缺少转换字符")
+		}
+		key := ""
+		if format[i] == '(' {
+			j := i + 1
+			for j < n && format[j] != ')' {
+				j++
+			}
+			if j >= n {
+				return nil, newExc("ValueError", "格式字符串中未闭合的 %%(")
+			}
+			key = format[i+1 : j]
+			i = j + 1
+		}
+		flags := ""
+		for i < n && strings.IndexByte("#0- +", format[i]) >= 0 {
+			flags += string(format[i])
+			i++
+		}
+		wstr := ""
+		for i < n && isDigitByte(format[i]) {
+			wstr += string(format[i])
+			i++
+		}
+		width := 0
+		if wstr != "" {
+			width, _ = strconv.Atoi(wstr)
+		}
+		hasPrec := false
+		prec := 0
+		if i < n && format[i] == '.' {
+			i++
+			pstr := ""
+			for i < n && isDigitByte(format[i]) {
+				pstr += string(format[i])
+				i++
+			}
+			if pstr != "" {
+				prec, _ = strconv.Atoi(pstr)
+				hasPrec = true
+			}
+		}
+		if i < n && (format[i] == 'l' || format[i] == 'L' || format[i] == 'h') {
+			i++
+		}
+		conv := format[i]
+		i++
+		if conv == '%' {
+			sb.WriteByte('%')
+			continue
+		}
+		var val Object
+		if key != "" {
+			if mapping == nil {
+				return nil, newExc("TypeError", "%%(name) 格式需要一个字典参数")
+			}
+			v, ok := mapping.Get(key)
+			if !ok {
+				return nil, newExc("KeyError", key)
+			}
+			val = v
+		} else {
+			if idx >= len(args) {
+				return nil, newExc("TypeError", "格式字符串的参数不足")
+			}
+			val = args[idx]
+			idx++
+		}
+		s, err := percentConv(val, conv, flags, width, hasPrec, prec)
+		if err != nil {
+			return nil, err
+		}
+		sb.WriteString(s)
+	}
+	return sb.String(), nil
+}
+
+func percentConv(val Object, conv byte, flags string, width int, hasPrec bool, prec int) (string, error) {
+	align := byte('>')
+	zero := false
+	if strings.Contains(flags, "-") {
+		align = '<'
+	} else if strings.Contains(flags, "0") {
+		zero = true
+	}
+	sign := ""
+	if strings.Contains(flags, "+") {
+		sign = "+"
+	} else if strings.Contains(flags, " ") {
+		sign = " "
+	}
+	alt := strings.Contains(flags, "#")
+	switch conv {
+	case 's', 'r':
+		var s string
+		if conv == 's' {
+			s = Str(val)
+		} else {
+			s = Repr(val)
+		}
+		if hasPrec {
+			runes := []rune(s)
+			if prec < len(runes) {
+				s = string(runes[:prec])
+			}
+		}
+		return padFieldA(s, width, align, ' ', false), nil
+	case 'c':
+		if iv, ok := intVal(val); ok {
+			return padFieldA(string(rune(iv)), width, align, ' ', false), nil
+		}
+		if s, ok := val.(string); ok && len([]rune(s)) == 1 {
+			return padFieldA(s, width, align, ' ', false), nil
+		}
+		return "", newExc("TypeError", "%%c 需要整数或单字符字符串")
+	case 'd', 'i', 'u', 'o', 'x', 'X', 'b', 'B':
+		iv, ok := intVal(val)
+		if !ok {
+			if f, ok2 := numVal(val); ok2 {
+				iv = int(f)
+			} else {
+				return "", newExc("TypeError", "%%%c 需要整数", conv)
+			}
+		}
+		return fmtInt(iv, conv, sign, alt, align, ' ', zero, width, hasPrec, prec), nil
+	case 'e', 'E', 'f', 'F', 'g', 'G':
+		fv, ok := numVal(val)
+		if !ok {
+			return "", newExc("TypeError", "%%%c 需要数值", conv)
+		}
+		return fmtFloat(fv, conv, sign, alt, align, ' ', zero, width, hasPrec, prec), nil
+	default:
+		return "", newExc("ValueError", "不支持的格式字符 '%%%c'", conv)
+	}
+}
+
 func intPow(a, b int) int {
 	r := 1
 	for i := 0; i < b; i++ {
 		r *= a
 	}
 	return r
+}
+
+// ============ str.format 风格格式化 ============
+
+// formatString 实现 str.format(*args, **kwargs)
+func formatString(format string, args []Object, kwargs map[string]Object) (string, error) {
+	var sb strings.Builder
+	i, n := 0, len(format)
+	auto := 0
+	for i < n {
+		c := format[i]
+		if c == '{' {
+			if i+1 < n && format[i+1] == '{' {
+				sb.WriteByte('{')
+				i += 2
+				continue
+			}
+			j := i + 1
+			for j < n && format[j] != '}' {
+				j++
+			}
+			if j >= n {
+				return "", newExc("ValueError", "未闭合的 {} 占位符")
+			}
+			spec := format[i+1 : j]
+			i = j + 1
+			text, err := renderField(spec, args, kwargs, &auto)
+			if err != nil {
+				return "", err
+			}
+			sb.WriteString(text)
+		} else if c == '}' {
+			if i+1 < n && format[i+1] == '}' {
+				sb.WriteByte('}')
+				i += 2
+				continue
+			}
+			return "", newExc("ValueError", "单独的 } 占位符")
+		} else {
+			sb.WriteByte(c)
+			i++
+		}
+	}
+	return sb.String(), nil
+}
+
+func renderField(spec string, args []Object, kwargs map[string]Object, auto *int) (string, error) {
+	field := spec
+	conv := byte(0)
+	fspec := ""
+	if idx := strings.IndexByte(spec, '!'); idx >= 0 {
+		field = spec[:idx]
+		rest := spec[idx+1:]
+		if len(rest) > 0 {
+			conv = rest[0]
+		}
+		if c2 := strings.IndexByte(rest, ':'); c2 >= 0 {
+			fspec = rest[c2+1:]
+		}
+	} else if idx := strings.IndexByte(spec, ':'); idx >= 0 {
+		field = spec[:idx]
+		fspec = spec[idx+1:]
+	}
+	var val Object
+	if field == "" {
+		if *auto >= len(args) {
+			return "", newExc("IndexError", "format 自动编号参数越界")
+		}
+		val = args[*auto]
+		*auto++
+	} else if isAllDigits(field) {
+		idx, _ := strconv.Atoi(field)
+		if idx >= len(args) {
+			return "", newExc("IndexError", "format 位置参数 %d 越界", idx)
+		}
+		val = args[idx]
+	} else {
+		if v, ok := kwargs[field]; ok {
+			val = v
+		} else {
+			return "", newExc("KeyError", field)
+		}
+	}
+	if conv == 'r' {
+		return formatValue(Repr(val), fspec)
+	}
+	if conv == 's' {
+		return formatValue(Str(val), fspec)
+	}
+	return formatValue(val, fspec)
+}
+
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if !isDigitByte(s[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func formatValue(val Object, fspec string) (string, error) {
+	fill := byte(' ')
+	align := byte(0)
+	pos := 0
+	if pos < len(fspec) && isAlign(fspec[pos]) {
+		align = fspec[pos]
+		pos++
+	} else if pos+1 < len(fspec) && isAlign(fspec[pos+1]) {
+		fill = fspec[pos]
+		align = fspec[pos+1]
+		pos += 2
+	}
+	sign := ""
+	if pos < len(fspec) && (fspec[pos] == '+' || fspec[pos] == '-' || fspec[pos] == ' ') {
+		sign = string(fspec[pos])
+		pos++
+	}
+	alt := false
+	if pos < len(fspec) && fspec[pos] == '#' {
+		alt = true
+		pos++
+	}
+	zero := false
+	if pos < len(fspec) && fspec[pos] == '0' {
+		zero = true
+		pos++
+	}
+	wstr := ""
+	for pos < len(fspec) && isDigitByte(fspec[pos]) {
+		wstr += string(fspec[pos])
+		pos++
+	}
+	width := 0
+	if wstr != "" {
+		width, _ = strconv.Atoi(wstr)
+	}
+	hasPrec := false
+	prec := 0
+	if pos < len(fspec) && fspec[pos] == '.' {
+		pos++
+		pstr := ""
+		for pos < len(fspec) && isDigitByte(fspec[pos]) {
+			pstr += string(fspec[pos])
+			pos++
+		}
+		if pstr != "" {
+			prec, _ = strconv.Atoi(pstr)
+			hasPrec = true
+		}
+	}
+	typ := byte(0)
+	if pos < len(fspec) {
+		typ = fspec[pos]
+		pos++
+	}
+	a := align
+	if a == 0 {
+		if zero {
+			a = '='
+		} else {
+			a = '>'
+		}
+	}
+	switch typ {
+	case 0, 's', 'r':
+		s := Str(val)
+		if typ == 'r' {
+			s = Repr(val)
+		}
+		if hasPrec {
+			runes := []rune(s)
+			if prec < len(runes) {
+				s = string(runes[:prec])
+			}
+		}
+		return padFieldA(s, width, a, fill, false), nil
+	case 'd', 'i', 'u', 'o', 'x', 'X', 'b', 'B':
+		iv, ok := intVal(val)
+		if !ok {
+			if f, ok2 := numVal(val); ok2 {
+				iv = int(f)
+			} else {
+				return "", newExc("TypeError", "format 需要整数用于 %%%c", typ)
+			}
+		}
+		return fmtInt(iv, typ, sign, alt, a, fill, zero, width, hasPrec, prec), nil
+	case 'e', 'E', 'f', 'F', 'g', 'G':
+		fv, ok := numVal(val)
+		if !ok {
+			return "", newExc("TypeError", "format 需要数值用于 %%%c", typ)
+		}
+		return fmtFloat(fv, typ, sign, alt, a, fill, zero, width, hasPrec, prec), nil
+	case 'c':
+		if iv, ok := intVal(val); ok {
+			return padFieldA(string(rune(iv)), width, a, fill, false), nil
+		}
+		if s, ok := val.(string); ok && len([]rune(s)) == 1 {
+			return padFieldA(s, width, a, fill, false), nil
+		}
+		return "", newExc("TypeError", "format %%c 需要整数或单字符")
+	case '%':
+		return padPercent(fvOf(val), sign, a, fill, width), nil
+	}
+	return "", newExc("ValueError", "未知的格式类型 '%c'", typ)
+}
+
+func fvOf(val Object) float64 {
+	if f, ok := numVal(val); ok {
+		return f
+	}
+	return 0
+}
+
+func padPercent(fv float64, sign string, a byte, fill byte, width int) string {
+	s := strconv.FormatFloat(fv*100, 'f', 6, 64)
+	if fv >= 0 {
+		if sign == "+" {
+			s = "+" + s
+		} else if sign == " " {
+			s = " " + s
+		}
+	}
+	return padFieldA(s+"%", width, a, fill, false)
 }
 
 func maxInt(a, b int) int {
