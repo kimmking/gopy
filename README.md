@@ -37,7 +37,7 @@ go run . path/to/script.py
 ./test.sh
 ```
 
-当前状态：`tests/01.py` … `tests/17.py` 与 `example.py` **全部与 `python3` 输出完全一致**。
+当前状态：`tests/01.py` … `tests/18.py` 与 `example.py` **全部与 `python3` 输出完全一致**。
 
 ## 整体架构
 
@@ -109,6 +109,7 @@ or < and < not < 比较(含 in/is) < | < ^ < & < 移位 < +- < */ // % < 一元 
 
 - `if` / `elif` / `else`、`while ... else`、`for ... in ... else`
 - `break` / `continue` / `pass`
+- `with` 语句：多上下文项（`with a() as x, b() as y:`）、按相反顺序调用 `__exit__`、异常信息传入 `__exit__`、返回 `True` 抑制异常；`__enter__`/`__exit__` 协议
 - 遍历目标：list / tuple / str / dict（键）/ set / range / 生成器
 
 **生成器**
@@ -194,6 +195,7 @@ or < and < not < 比较(含 in/is) < | < ^ < & < 移位 < +- < */ // % < 一元 
 | `tests/15.py` | 字符串增强与格式化：printf 风格 `%s %d %x %f`（宽度/精度/对齐/符号/`#`/字典映射）、新增方法 `partition/rpartition/istitle/isnumeric/isdecimal/casefold/removeprefix/removesuffix/expandtabs`、`str.format` 自动编号/位置/关键字/格式说明符 |
 | `tests/16.py` | `nonlocal` 闭包计数、调用处 `*args/**kwargs` 展开、装饰器（堆叠/带参/透传/记录调用）、函数 `__name__` |
 | `tests/17.py` | 生成器：`yield`、`next()`/默认值/StopIteration、惰性求值、生成器表达式（含免括号实参）、生成器管道、耗尽后再迭代 |
+| `tests/18.py` | `with` 语句：进入/退出顺序、异常传播与抑制（`__exit__` 返回 True）、嵌套与多上下文项、资源类、`return`/`break` 穿过 with、`exc_type.__name__` |
 | `example.py` | 综合示例（脚本级冒烟测试） |
 
 ## 实现要点与已知取舍
@@ -203,7 +205,7 @@ or < and < not < 比较(含 in/is) < | < ^ < & < 移位 < +- < */ // % < 一元 
 - **UTF-8**：词法分析按字节扫描，多字节字符必须原样输出（`string([]byte{c})`），不能走 `string(c)` 的 code point 转换，否则中文会变成乱码。
 - **数字精度**：使用 Go `int` / `float64`，因此没有 Python 的任意精度整数；超大整数运算与 CPython 行为可能存在差异。
 - **`newExc` 格式化**：内部使用 `fmt.Sprintf`，错误信息中的字面量 `%` 必须写成 `%%`，否则会被误判为格式动词。
-- **尚未实现**：`with` 语句、多继承、关键字-only 参数、模块文件导入（只能导入内置模块）。
+- **尚未实现**：多继承、关键字-only 参数、模块文件导入（只能导入内置模块）。
 
 ## 常见问题
 

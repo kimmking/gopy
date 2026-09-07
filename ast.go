@@ -106,6 +106,18 @@ type TryStmt struct {
 	Finally  []Stmt
 }
 
+// WithItem 是 with 的一个上下文项，Alias 为 `as` 绑定的名字（可空）
+type WithItem struct {
+	CtxExpr Expr
+	Alias   string
+}
+
+// WithStmt with 语句：调用 __enter__ / __exit__ 管理资源
+type WithStmt struct {
+	Items []*WithItem
+	Body  []Stmt
+}
+
 // ImportAlias 表示 import a.b as c 中的一个名字
 type ImportAlias struct {
 	Path  []string
@@ -171,6 +183,7 @@ func (*ContinueStmt) stmt()   {}
 func (*PassStmt) stmt()       {}
 func (*ClassDef) stmt()       {}
 func (*TryStmt) stmt()        {}
+func (*WithStmt) stmt()       {}
 func (*ImportStmt) stmt()     {}
 func (*FromImportStmt) stmt() {}
 func (*RaiseStmt) stmt()      {}

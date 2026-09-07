@@ -201,6 +201,8 @@ func (p *Parser) parseStatement() Stmt {
 		return p.parseClassDef()
 	case p.atKw("try"):
 		return p.parseTry()
+	case p.atKw("with"):
+		return p.parseWith()
 	case p.atKw("import"):
 		return p.parseImport()
 	case p.atKw("from"):
@@ -451,6 +453,25 @@ func (p *Parser) parseTry() Stmt {
 		p.advance()
 		st.Finally = p.parseBlock()
 	}
+	return st
+}
+
+// parseWith 解析 with 语句：with expr [as name] (, expr [as name])* : block
+func (p *Parser) parseWith() Stmt {
+	p.expectKw("with")
+	st := &WithStmt{}
+	for {
+		item := &WithItem{CtxExpr: p.parseConditional()}
+		if p.acceptKw("as") {
+			item.Alias = p.expectName()
+		}
+		st.Items = append(st.Items, item)
+		if p.acceptOp(",") {
+			continue
+		}
+		break
+	}
+	st.Body = p.parseBlock()
 	return st
 }
 

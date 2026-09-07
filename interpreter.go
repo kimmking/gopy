@@ -224,6 +224,9 @@ func (i *Interpreter) exec(s Stmt) (*signal, error) {
 	case *TryStmt:
 		return i.execTry(st)
 
+	case *WithStmt:
+		return i.execWith(st)
+
 	case *ImportStmt:
 		for _, a := range st.Names {
 			mod, err := i.importModule(a.Path)
@@ -327,6 +330,81 @@ func (i *Interpreter) exec(s Stmt) (*signal, error) {
 	}
 	return nil, newExc("RuntimeError", "无法执行的语句")
 }
+
+// execWith 执行 with 语句：按序进入各上下文，执行体后按相反顺序退出。
+// 若体中发生异常，异常信息传给 __exit__；__exit__ 返回 True 表示抑制异常。
+func (i *Interpreter) execWith(st *WithStmt) (*signal, error) {
+	exits := make([]Object, 0, len(st.Items))
+	for _, it := range st.Items {
+		v, err := i.eval(it.CtxExpr)
+		if err != nil {
+			if ferr := i.runWithExits(exits, nil); ferr != nil {
+				return nil, ferr
+			}
+			return nil, err
+		}
+		enterFn, err := getAttr(v, "__enter__")
+		if err != nil {
+			if ferr := i.runWithExits(exits, nil); ferr != nil {
+				return nil, ferr
+			}
+			return nil, err
+		}
+		res, err := i.callObject(enterFn, nil, nil)
+		if err != nil {
+			if ferr := i.runWithExits(exits, nil); ferr != nil {
+				return nil, ferr
+			}
+			return nil, err
+		}
+		if it.Alias != "" {
+			i.setVar(it.Alias, res)
+		}
+		exitFn, err := getAttr(v, "__exit__")
+		if err != nil {
+			if ferr := i.runWithExits(exits, nil); ferr != nil {
+				return nil, ferr
+			}
+			return nil, err
+		}
+		exits = append(exits, exitFn)
+	}
+	sig, berr := i.execBlock(st.Body)
+	remaining := i.runWithExits(exits, berr)
+	if remaining != nil {
+		return nil, remaining
+	}
+	return sig, nil
+}
+
+// runWithExits 按相反顺序调用 __exit__；返回值为 True 时抑制传入的异常
+func (i *Interpreter) runWithExits(exits []Object, bodyErr error) error {
+	err := bodyErr
+	for k := len(exits) - 1; k >= 0; k-- {
+		var args []Object
+		if err != nil {
+			if pe, ok := err.(*PyException); ok {
+				args = []Object{&PyType{Name: pe.ExcType}, pe, None}
+			} else {
+				args = []Object{&PyType{Name: "RuntimeError"}, None, None}
+			}
+		} else {
+			args = []Object{None, None, None}
+		}
+		res, eerr := i.callObject(exits[k], args, nil)
+		if eerr != nil {
+			return eerr
+		}
+		if err != nil {
+			if b, ok := res.(bool); ok && b {
+				err = nil
+			}
+		}
+	}
+	return err
+}
+
+// ---------- 装饰器 ----------
 
 // execDecorated 先执行被装饰的 def/class，再自内向外应用装饰器
 func (i *Interpreter) execDecorated(st *DecoratedStmt) error {
@@ -1336,6 +1414,11 @@ func getAttr(obj Object, name string) (Object, error) {
 			return x.Name, nil
 		}
 		return nil, newExc("AttributeError", "'function' 对象没有属性 '%s'", name)
+	case *PyType:
+		if name == "__name__" || name == "name" {
+			return x.Name, nil
+		}
+		return nil, newExc("AttributeError", "type 对象没有属性 '%s'", name)
 	case *PyException:
 		switch name {
 		case "args":
@@ -1647,6 +1730,10 @@ func containsYield(stmts []Stmt) bool {
 				if containsYield(h.Body) {
 					return true
 				}
+			}
+		case *WithStmt:
+			if containsYield(t.Body) {
+				return true
 			}
 		}
 	}
