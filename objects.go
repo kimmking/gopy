@@ -172,6 +172,15 @@ type Method struct {
 	Fn   *Function
 }
 
+// Property @property 包装的 getter
+type Property struct{ Getter *Function }
+
+// StaticMethod @staticmethod 包装的函数（访问时不绑定 self）
+type StaticMethod struct{ Fn *Function }
+
+// ClassMethod @classmethod 包装的函数（访问时绑定类对象）
+type ClassMethod struct{ Fn *Function }
+
 // BuiltinMethod 绑定到内建类型实例的方法
 type BuiltinMethod struct {
 	Recv Object
@@ -327,6 +336,12 @@ func typeName(v Object) string {
 		return "method"
 	case *BuiltinMethod:
 		return "method"
+	case *Property:
+		return "property"
+	case *StaticMethod:
+		return "function"
+	case *ClassMethod:
+		return "bound method"
 	case *Class:
 		return "type"
 	case *PyType:
@@ -405,8 +420,35 @@ func truthy(v Object) bool {
 		return x.Len() > 0
 	case *Range:
 		return x.Len() > 0
+	case *Instance:
+		// 实例的真值由 __bool__ 决定（缺省恒真）
+		if m, has := instanceBoolFn(x); has {
+			v, err := callObjectRef(m, nil, nil)
+			if err != nil {
+				return true
+			}
+			return truthy(v)
+		}
 	}
 	return true
+}
+
+// instanceBoolFn 查找实例的 __bool__ 方法
+func instanceBoolFn(inst *Instance) (*Method, bool) {
+	fn, ok := inst.Class.LookupMethod("__bool__")
+	if !ok {
+		return nil, false
+	}
+	return &Method{Recv: inst, Fn: fn}, true
+}
+
+// isBasicValue 判断是否为非容器的基础值
+func isBasicValue(v Object) bool {
+	switch v.(type) {
+	case int, float64, bool, string:
+		return true
+	}
+	return false
 }
 
 // keyOf 生成 dict / set 的键；数值按其值归一化，符合 Python 的 1 == 1.0
@@ -475,18 +517,28 @@ func fakeAddr(prefix string) string {
 	return fmt.Sprintf("0x%08x", 0x1000+addrCounter)
 }
 
-// instanceStrHook 由 interpreter.go 在 init 中注入，用于调用实例的 __str__。
+// instanceStrHook 由 interpreter.go 在 init 中注入，用于调用实例的 __str__/__repr__。
 // 通过函数变量而非直接调用，避免 Repr 与求值器之间形成包级初始化循环。
-var instanceStrHook func(inst *Instance) (string, bool)
+var instanceStrHook func(inst *Instance, dunder string) (string, bool)
 
-// instanceRepr 供 Repr 使用：优先尝试 __str__，否则输出默认的对象表示
+// instanceRepr 实现 repr(obj)：优先 __repr__，否则默认对象表示
 func instanceRepr(inst *Instance) string {
 	if instanceStrHook != nil {
-		if s, ok := instanceStrHook(inst); ok {
+		if s, ok := instanceStrHook(inst, "__repr__"); ok {
 			return s
 		}
 	}
 	return "<" + inst.Class.Name + " object at " + fakeAddr("obj") + ">"
+}
+
+// instanceToString 实现 str(obj)：优先 __str__，否则回退到 repr
+func instanceToString(inst *Instance) string {
+	if instanceStrHook != nil {
+		if s, ok := instanceStrHook(inst, "__str__"); ok {
+			return s
+		}
+	}
+	return instanceRepr(inst)
 }
 
 // Repr 生成 Python repr()
@@ -567,13 +619,15 @@ func Repr(v Object) string {
 	return fmt.Sprintf("%v", v)
 }
 
-// Str 生成 Python str()：字符串本身不加引号，异常只输出消息，容器沿用 repr
+// Str 生成 Python str()：字符串本身不加引号，异常只输出消息，实例优先 __str__，容器沿用 repr
 func Str(v Object) string {
 	switch x := v.(type) {
 	case string:
 		return x
 	case *PyException:
 		return x.Msg
+	case *Instance:
+		return instanceToString(x)
 	}
 	return Repr(v)
 }
@@ -686,7 +740,60 @@ func compareValues(a, b Object) (int, bool) {
 
 // ============ 运算符 ============
 
+// dunderOpName 把算术运算符映射到双下划线方法名
+func dunderOpName(op string) string {
+	switch op {
+	case "+":
+		return "add"
+	case "-":
+		return "sub"
+	case "*":
+		return "mul"
+	case "/":
+		return "truediv"
+	case "//":
+		return "floordiv"
+	case "%":
+		return "mod"
+	case "**":
+		return "pow"
+	}
+	return ""
+}
+
+// instanceBinOp 尝试用实例的运算符重载方法执行二元运算；
+// 先试左操作数的 __op__，再试右操作数的 __rop__。命中返回结果。
+func instanceBinOp(op string, l, r Object) (Object, bool, error) {
+	name := dunderOpName(op)
+	if name == "" {
+		return nil, false, nil
+	}
+	if li, ok := l.(*Instance); ok {
+		if fn, ok2 := li.Class.LookupMethod("__" + name + "__"); ok2 {
+			v, err := callObjectRef(&Method{Recv: li, Fn: fn}, []Object{r}, nil)
+			return v, true, err
+		}
+	}
+	if ri, ok := r.(*Instance); ok {
+		if fn, ok2 := ri.Class.LookupMethod("__r" + name + "__"); ok2 {
+			v, err := callObjectRef(&Method{Recv: ri, Fn: fn}, []Object{l}, nil)
+			return v, true, err
+		}
+	}
+	return nil, false, nil
+}
+
 func binaryOp(op string, l, r Object) (Object, error) {
+	// 实例的运算符重载优先于内建路径
+	if _, isL := l.(*Instance); isL {
+		if v, hit, err := instanceBinOp(op, l, r); hit {
+			return v, err
+		}
+	} else if _, isR := r.(*Instance); isR {
+		if v, hit, err := instanceBinOp(op, l, r); hit {
+			return v, err
+		}
+	}
 	switch op {
 	case "+":
 		li, lok := intVal(l)
@@ -1487,6 +1594,16 @@ func iterate(v Object) ([]Object, error) {
 
 // contains 实现 in / not in
 func contains(needle, hay Object) (bool, error) {
+	// 实例的 __contains__ 优先
+	if inst, ok := hay.(*Instance); ok {
+		if fn, has := inst.Class.LookupMethod("__contains__"); has {
+			v, err := callObjectRef(&Method{Recv: inst, Fn: fn}, []Object{needle}, nil)
+			if err != nil {
+				return false, err
+			}
+			return truthy(v), nil
+		}
+	}
 	switch x := hay.(type) {
 	case *List, *Tuple, *Set, *Range:
 		items, err := iterate(hay)

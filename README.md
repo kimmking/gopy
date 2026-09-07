@@ -37,7 +37,7 @@ go run . path/to/script.py
 ./test.sh
 ```
 
-当前状态：`tests/01.py` … `tests/18.py` 与 `example.py` **全部与 `python3` 输出完全一致**。
+当前状态：`tests/01.py` … `tests/19.py` 与 `example.py` **全部与 `python3` 输出完全一致**。
 
 ## 整体架构
 
@@ -140,7 +140,10 @@ or < and < not < 比较(含 in/is) < | < ^ < & < 移位 < +- < */ // % < 一元 
 **类与对象**
 
 - `class` 定义、`__init__` 构造、`self` 自动绑定
-- 单继承（方法沿父链查找）、`isinstance`、类属性
+- 单继承（方法沿父链查找）、`isinstance`、类属性（含类属性赋值 `Cls.attr = v`）
+- 运算符重载：`__add__ __sub__ __mul__ __truediv__ __floordiv__ __mod__ __pow__` 及其反射形式 `__r*__`、`__eq__ __ne__ __lt__ __le__ __gt__ __ge__`、`__len__ __getitem__ __setitem__ __contains__ __call__ __bool__`
+- `__repr__` / `__str__` 分工与 CPython 一致：`repr()` 用 `__repr__`，`str()` 优先 `__str__` 回退 `__repr__`
+- `@property` / `@staticmethod` / `@classmethod` 描述符（classmethod 绑定动态类）
 - `print(obj)` 优先调用 `__str__`，否则输出 `<Dog object at 0x...>`
 
 **推导式**
@@ -160,7 +163,7 @@ or < and < not < 比较(含 in/is) < | < ^ < & < 移位 < +- < */ // % < 一元 
 
 **内置函数**
 
-`print len str repr type int float bool list tuple dict set range abs round pow divmod min max sum sorted reversed enumerate zip map filter any all chr ord hex oct bin isinstance hasattr getattr setattr id input exit long next iter`
+`print len str repr type int float bool list tuple dict set range abs round pow divmod min max sum sorted reversed enumerate zip map filter any all chr ord hex oct bin isinstance hasattr getattr setattr id input exit long next iter property staticmethod classmethod`
 
 > `long` 为兼容 Python 2 的长整型转换，在本解释器中与 `int` 等价（支持 `base`）。
 
@@ -196,6 +199,7 @@ or < and < not < 比较(含 in/is) < | < ^ < & < 移位 < +- < */ // % < 一元 
 | `tests/16.py` | `nonlocal` 闭包计数、调用处 `*args/**kwargs` 展开、装饰器（堆叠/带参/透传/记录调用）、函数 `__name__` |
 | `tests/17.py` | 生成器：`yield`、`next()`/默认值/StopIteration、惰性求值、生成器表达式（含免括号实参）、生成器管道、耗尽后再迭代 |
 | `tests/18.py` | `with` 语句：进入/退出顺序、异常传播与抑制（`__exit__` 返回 True）、嵌套与多上下文项、资源类、`return`/`break` 穿过 with、`exc_type.__name__` |
+| `tests/19.py` | 运算符重载（算术/反射/比较/`len`/下标/`in`/`__call__`/`__bool__`）、`__repr__`/`__str__` 分工、`@property`/`@staticmethod`/`@classmethod`、类属性赋值 |
 | `example.py` | 综合示例（脚本级冒烟测试） |
 
 ## 实现要点与已知取舍

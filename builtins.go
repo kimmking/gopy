@@ -989,6 +989,17 @@ var builtinFuncs = map[string]BuiltinFn{
 			return x.Len(), nil
 		case string:
 			return len([]rune(x)), nil
+		case *Instance:
+			if fn, ok := args[0].(*Instance).Class.LookupMethod("__len__"); ok {
+				v, err := callObjectRef(&Method{Recv: args[0], Fn: fn}, nil, nil)
+				if err != nil {
+					return nil, err
+				}
+				if n, ok := intVal(v); ok {
+					return n, nil
+				}
+				return nil, newExc("TypeError", "__len__ 返回值必须是整数")
+			}
 		}
 		return nil, newExc("TypeError", "'%s' 对象没有长度", typeName(args[0]))
 	},
@@ -1520,6 +1531,36 @@ var builtinFuncs = map[string]BuiltinFn{
 		}
 		os.Exit(code)
 		return None, nil
+	},
+	"property": func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) != 1 {
+			return nil, argCountErr("property", len(args), 1)
+		}
+		fn, ok := args[0].(*Function)
+		if !ok {
+			return nil, newExc("TypeError", "property() 需要函数参数")
+		}
+		return &Property{Getter: fn}, nil
+	},
+	"staticmethod": func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) != 1 {
+			return nil, argCountErr("staticmethod", len(args), 1)
+		}
+		fn, ok := args[0].(*Function)
+		if !ok {
+			return nil, newExc("TypeError", "staticmethod() 需要函数参数")
+		}
+		return &StaticMethod{Fn: fn}, nil
+	},
+	"classmethod": func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) != 1 {
+			return nil, argCountErr("classmethod", len(args), 1)
+		}
+		fn, ok := args[0].(*Function)
+		if !ok {
+			return nil, newExc("TypeError", "classmethod() 需要函数参数")
+		}
+		return &ClassMethod{Fn: fn}, nil
 	},
 	"next": func(args []Object, kwargs map[string]Object) (Object, error) {
 		if len(args) < 1 {

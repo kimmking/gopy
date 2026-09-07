@@ -490,12 +490,15 @@ func (i *Interpreter) assignTarget(t Expr, v Object) error {
 		if err != nil {
 			return err
 		}
-		inst, ok := obj.(*Instance)
-		if !ok {
-			return newExc("AttributeError", "'%s' 对象不支持属性赋值", typeName(obj))
+		switch t := obj.(type) {
+		case *Instance:
+			t.Fields[tt.Attr] = v
+			return nil
+		case *Class:
+			t.Attrs[tt.Attr] = v
+			return nil
 		}
-		inst.Fields[tt.Attr] = v
-		return nil
+		return newExc("AttributeError", "'%s' 对象不支持属性赋值", typeName(obj))
 	case *Subscript:
 		obj, err := i.eval(tt.Value)
 		if err != nil {
@@ -563,6 +566,13 @@ func (i *Interpreter) bindTargets(targets []Expr, v Object) error {
 }
 
 func (i *Interpreter) setItem(obj, key, v Object) error {
+	// 实例的 __setitem__ 优先
+	if inst, ok := obj.(*Instance); ok {
+		if fn, has := inst.Class.LookupMethod("__setitem__"); has {
+			_, err := callObjectRef(&Method{Recv: inst, Fn: fn}, []Object{key, v}, nil)
+			return err
+		}
+	}
 	switch x := obj.(type) {
 	case *Dict:
 		x.Set(key, v)
@@ -692,12 +702,14 @@ func (i *Interpreter) execClassDef(st *ClassDef) error {
 			if err != nil {
 				break
 			}
-			if v, ok := classEnv.vars[ds.decoratedName()]; ok {
+			name := ds.decoratedName()
+			if v, ok := classEnv.vars[name]; ok {
 				if fn, isFn := v.(*Function); isFn {
-					cls.Methods[ds.decoratedName()] = fn
+					cls.Methods[name] = fn
+					// 函数从 classEnv 移除；其余（property/static/classmethod 等
+					// 包装对象）保留，随后统一成为类属性
+					delete(classEnv.vars, name)
 				}
-				// 非函数结果（如 property 等包装对象）留在 classEnv，随后成为类属性
-				delete(classEnv.vars, ds.decoratedName())
 			}
 			continue
 		}
@@ -749,18 +761,18 @@ func (i *Interpreter) instantiate(cls *Class, args []Object, kwargs map[string]O
 	return inst, nil
 }
 
-// init 注入实例字符串化钩子：Repr 通过它调用 __str__
+// init 注入实例字符串化钩子：Repr/Str 通过它调用 __repr__/__str__
 func init() {
-	instanceStrHook = func(inst *Instance) (string, bool) {
+	instanceStrHook = func(inst *Instance, dunder string) (string, bool) {
 		if activeInterp == nil || activeInterp.reprDepth >= 4 {
 			return "", false
 		}
-		if _, ok := inst.Class.LookupMethod("__str__"); !ok {
+		if _, ok := inst.Class.LookupMethod(dunder); !ok {
 			return "", false
 		}
 		activeInterp.reprDepth++
 		defer func() { activeInterp.reprDepth-- }()
-		m, err := getAttr(inst, "__str__")
+		m, err := getAttr(inst, dunder)
 		if err != nil {
 			return "", false
 		}
@@ -1073,11 +1085,76 @@ func (i *Interpreter) evalCompare(c *Compare) (Object, error) {
 	return true, nil
 }
 
+// instanceCompareOp 尝试用实例的重载比较方法比较；命中返回结果
+func instanceCompareOp(op string, l, r Object) (Object, bool, error) {
+	li, lok := l.(*Instance)
+	if !lok {
+		return nil, false, nil
+	}
+	var name string
+	switch op {
+	case "<":
+		name = "__lt__"
+	case "<=":
+		name = "__le__"
+	case ">":
+		name = "__gt__"
+	case ">=":
+		name = "__ge__"
+	default:
+		return nil, false, nil
+	}
+	fn, ok := li.Class.LookupMethod(name)
+	if !ok {
+		return nil, false, nil
+	}
+	v, err := callObjectRef(&Method{Recv: li, Fn: fn}, []Object{r}, nil)
+	return v, true, err
+}
+
+// instanceEqOp 尝试 __eq__ / __ne__；hit 为 false 表示没有定义
+func instanceEqOp(op string, l, r Object) (Object, bool, error) {
+	name := "__ne__"
+	if op == "==" {
+		name = "__eq__"
+	}
+	for _, cand := range []Object{l, r} {
+		inst, ok := cand.(*Instance)
+		if !ok {
+			continue
+		}
+		fn, has := inst.Class.LookupMethod(name)
+		if !has {
+			continue
+		}
+		v, err := callObjectRef(&Method{Recv: inst, Fn: fn}, []Object{otherOf(l, r, cand)}, nil)
+		return v, true, err
+	}
+	return nil, false, nil
+}
+
+func otherOf(l, r, cand Object) Object {
+	if cand == l {
+		return r
+	}
+	return l
+}
+
 func applyCompare(op string, l, r Object) (Object, error) {
 	switch op {
-	case "==":
-		return objectsEqual(l, r), nil
-	case "!=":
+	case "==", "!=":
+		if v, hit, err := instanceEqOp(op, l, r); hit {
+			if err != nil {
+				return nil, err
+			}
+			if op == "!=" {
+				return !truthy(v), nil
+			}
+			return v, nil
+		}
+		if op == "==" {
+			return objectsEqual(l, r), nil
+		}
 		return !objectsEqual(l, r), nil
 	case "in":
 		return contains(l, r)
@@ -1092,6 +1169,12 @@ func applyCompare(op string, l, r Object) (Object, error) {
 	case "is not":
 		return !sameObject(l, r), nil
 	case "<", "<=", ">", ">=":
+		if v, hit, err := instanceCompareOp(op, l, r); hit {
+			if err != nil {
+				return nil, err
+			}
+			return v, nil
+		}
 		c, ok := compareValues(l, r)
 		if !ok {
 			return nil, newExc("TypeError", "'%s' 与 '%s' 之间不支持 '%s'", typeName(l), typeName(r), op)
@@ -1249,6 +1332,12 @@ func genExprBody(el Expr, clauses []CompClause) []Stmt {
 // ---------- 下标与切片 ----------
 
 func (i *Interpreter) getItem(obj, key Object) (Object, error) {
+	// 实例的 __getitem__ 优先
+	if inst, ok := obj.(*Instance); ok {
+		if fn, has := inst.Class.LookupMethod("__getitem__"); has {
+			return callObjectRef(&Method{Recv: inst, Fn: fn}, []Object{key}, nil)
+		}
+	}
 	switch x := obj.(type) {
 	case *List:
 		n, ok := intVal(key)
@@ -1383,17 +1472,47 @@ func builtinMethodExists(typeStr, name string) bool {
 	return false
 }
 
+// unwrapClassAttr 解包类属性中的描述符包装（property/staticmethod/classmethod）
+// recv 为实例时绑定 property getter；recv 为 nil 表示通过类访问。
+func unwrapClassAttr(owner *Class, recv Object, v Object) (Object, bool) {
+	switch w := v.(type) {
+	case *Property:
+		if recv == nil {
+			return w, true
+		}
+		r, err := callObjectRef(w.Getter, []Object{recv}, nil)
+		if err != nil {
+			return nil, false
+		}
+		return r, true
+	case *StaticMethod:
+		return w.Fn, true
+	case *ClassMethod:
+		// 通过实例访问时绑定其实际类型（动态类），通过类访问时绑定该类
+		if inst, ok := recv.(*Instance); ok {
+			return &Method{Recv: inst.Class, Fn: w.Fn}, true
+		}
+		return &Method{Recv: owner, Fn: w.Fn}, true
+	}
+	return v, true
+}
+
 func getAttr(obj Object, name string) (Object, error) {
 	switch x := obj.(type) {
 	case *Instance:
 		if v, ok := x.Fields[name]; ok {
 			return v, nil
 		}
-		if fn, ok := x.Class.LookupMethod(name); ok {
-			return &Method{Recv: obj, Fn: fn}, nil
-		}
-		if v, ok := x.Class.LookupAttr(name); ok {
-			return v, nil
+		for cur := x.Class; cur != nil; cur = cur.Parent {
+			if fn, ok := cur.Methods[name]; ok {
+				return &Method{Recv: obj, Fn: fn}, nil
+			}
+			if v, ok := cur.Attrs[name]; ok {
+				if r, ok2 := unwrapClassAttr(cur, obj, v); ok2 {
+					return r, nil
+				}
+				return nil, newExc("AttributeError", "属性 '%s' 访问失败", name)
+			}
 		}
 		return nil, newExc("AttributeError", "'%s' 对象没有属性 '%s'", x.Class.Name, name)
 	case *Module:
@@ -1402,11 +1521,16 @@ func getAttr(obj Object, name string) (Object, error) {
 		}
 		return nil, newExc("AttributeError", "module '%s' 没有属性 '%s'", x.Name, name)
 	case *Class:
-		if fn, ok := x.LookupMethod(name); ok {
-			return fn, nil
-		}
-		if v, ok := x.LookupAttr(name); ok {
-			return v, nil
+		for cur := x; cur != nil; cur = cur.Parent {
+			if fn, ok := cur.Methods[name]; ok {
+				return fn, nil
+			}
+			if v, ok := cur.Attrs[name]; ok {
+				if r, ok2 := unwrapClassAttr(cur, nil, v); ok2 {
+					return r, nil
+				}
+				return nil, newExc("AttributeError", "属性 '%s' 访问失败", name)
+			}
 		}
 		return nil, newExc("AttributeError", "type object '%s' 没有属性 '%s'", x.Name, name)
 	case *Function:
@@ -1507,6 +1631,15 @@ func (i *Interpreter) callObject(fn Object, args []Object, kwargs map[string]Obj
 		return callBuiltinMethod(f.Recv, f.Name, args, kwargs)
 	case *Class:
 		return i.instantiate(f, args, kwargs)
+	case *Instance:
+		// 实例可调用：走 __call__ 方法
+		if fn, ok := f.Class.LookupMethod("__call__"); ok {
+			all := make([]Object, 0, len(args)+1)
+			all = append(all, f)
+			all = append(all, args...)
+			return i.callFunction(fn, all, kwargs)
+		}
+		return nil, newExc("TypeError", "'%s' 对象不可调用", f.Class.Name)
 	case *PyType:
 		if isExceptionTypeName(f.Name) {
 			msg := ""
