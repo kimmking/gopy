@@ -278,8 +278,63 @@ func (i *Interpreter) exec(s Stmt) (*signal, error) {
 			}
 		}
 		return nil, nil
+
+	case *NonlocalStmt:
+		if i.env.declaredNonlocal == nil {
+			i.env.declaredNonlocal = map[string]bool{}
+		}
+		for _, n := range st.Names {
+			// 与 Python 一致：nonlocal 的名字必须已在某个外层函数作用域中绑定
+			found := false
+			for cur := i.env.parent; cur != nil; cur = cur.parent {
+				if _, ok := cur.vars[n]; ok {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return nil, newExc("SyntaxError", "no binding for nonlocal '%s' found", n)
+			}
+			i.env.declaredNonlocal[n] = true
+		}
+		return nil, nil
+
+	case *DecoratedStmt:
+		return nil, i.execDecorated(st)
 	}
 	return nil, newExc("RuntimeError", "无法执行的语句")
+}
+
+// execDecorated 先执行被装饰的 def/class，再自内向外应用装饰器
+func (i *Interpreter) execDecorated(st *DecoratedStmt) error {
+	var name string
+	switch t := st.Target.(type) {
+	case *FuncDef:
+		name = t.Name
+	case *ClassDef:
+		name = t.Name
+	default:
+		return newExc("SyntaxError", "装饰器只能修饰 def 或 class")
+	}
+	if _, err := i.exec(st.Target); err != nil {
+		return err
+	}
+	v, ok := i.env.Get(name)
+	if !ok {
+		return newExc("RuntimeError", "装饰目标 '%s' 定义失败", name)
+	}
+	for k := len(st.Decorators) - 1; k >= 0; k-- {
+		d, err := i.eval(st.Decorators[k])
+		if err != nil {
+			return err
+		}
+		v, err = i.callObject(d, []Object{v}, nil)
+		if err != nil {
+			return err
+		}
+	}
+	i.env.Set(name, v)
+	return nil
 }
 
 // ---------- 赋值 ----------
@@ -369,11 +424,20 @@ func (i *Interpreter) assignTarget(t Expr, v Object) error {
 }
 
 // setVar 采用 Python 语义：赋值在当前作用域建立绑定，
-// 除非该名字在当前帧被 global 声明过。
+// 除非该名字在当前帧被 global / nonlocal 声明过。
 func (i *Interpreter) setVar(name string, v Object) {
 	if i.env.declaredGlobal[name] {
 		i.env.global.vars[name] = v
 		return
+	}
+	if i.env.declaredNonlocal[name] {
+		// 绑定到最近一个拥有该名字的外层作用域（exec NonlocalStmt 已校验存在性）
+		for cur := i.env.parent; cur != nil; cur = cur.parent {
+			if _, ok := cur.vars[name]; ok {
+				cur.vars[name] = v
+				return
+			}
+		}
 	}
 	i.env.Set(name, v)
 }
@@ -518,6 +582,20 @@ func (i *Interpreter) execClassDef(st *ClassDef) error {
 				Body:     fd.Body,
 				Env:      classEnv,
 				Defaults: defaults,
+			}
+			continue
+		}
+		if ds, ok := bs.(*DecoratedStmt); ok {
+			err = i.execDecorated(ds)
+			if err != nil {
+				break
+			}
+			if v, ok := classEnv.vars[ds.decoratedName()]; ok {
+				if fn, isFn := v.(*Function); isFn {
+					cls.Methods[ds.decoratedName()] = fn
+				}
+				// 非函数结果（如 property 等包装对象）留在 classEnv，随后成为类属性
+				delete(classEnv.vars, ds.decoratedName())
 			}
 			continue
 		}
@@ -1204,6 +1282,11 @@ func getAttr(obj Object, name string) (Object, error) {
 			return v, nil
 		}
 		return nil, newExc("AttributeError", "type object '%s' 没有属性 '%s'", x.Name, name)
+	case *Function:
+		if name == "__name__" || name == "name" {
+			return x.Name, nil
+		}
+		return nil, newExc("AttributeError", "'function' 对象没有属性 '%s'", name)
 	case *PyException:
 		switch name {
 		case "args":
@@ -1229,9 +1312,28 @@ func (i *Interpreter) evalCall(c *Call) (Object, error) {
 		if err != nil {
 			return nil, err
 		}
-		if a.Name != "" {
+		switch {
+		case a.Star:
+			items, err := iterate(v)
+			if err != nil {
+				return nil, err
+			}
+			args = append(args, items...)
+		case a.Star2:
+			d, ok := v.(*Dict)
+			if !ok {
+				return nil, newExc("TypeError", "** 展开的参数必须是字典，实际为 '%s'", typeName(v))
+			}
+			for _, k := range d.Keys {
+				ks, ok := k.(string)
+				if !ok {
+					return nil, newExc("TypeError", "** 展开的键必须是字符串")
+				}
+				kwargs[ks] = d.Vals[keyOf(k)]
+			}
+		case a.Name != "":
 			kwargs[a.Name] = v
-		} else {
+		default:
 			args = append(args, v)
 		}
 	}
@@ -1326,7 +1428,7 @@ func (i *Interpreter) callFunction(fn *Function, args []Object, kwargs map[strin
 			for ; pi < len(args); pi++ {
 				rest = append(rest, args[pi])
 			}
-			local.Set(p.Name, &List{Items: rest})
+			local.Set(p.Name, &Tuple{Items: rest})
 		} else if p.Star2 {
 			d := NewDict()
 			for k, v := range kwargs {

@@ -37,7 +37,7 @@ go run . path/to/script.py
 ./test.sh
 ```
 
-当前状态：`tests/01.py` … `tests/15.py` 与 `example.py` **全部与 `python3` 输出完全一致**。
+当前状态：`tests/01.py` … `tests/16.py` 与 `example.py` **全部与 `python3` 输出完全一致**。
 
 ## 整体架构
 
@@ -114,8 +114,11 @@ or < and < not < 比较(含 in/is) < | < ^ < & < 移位 < +- < */ // % < 一元 
 **函数**
 
 - `def` 定义，位置参数、默认参数、关键字参数、`*args`、`**kwargs`
-- 递归、闭包、嵌套函数、作用域隔离
+- 调用处 `*iterable` / `**mapping` 参数展开（如 `f(*nums, **opts)`）
+- 递归、闭包、嵌套函数、作用域隔离；`global` 与 `nonlocal` 声明
+- 装饰器：`@dec`、堆叠装饰、带参数的装饰器工厂，可修饰函数与类（以及类中的方法）
 - `lambda` 与 `map` / `filter` / `sorted(key=...)` 等高阶函数
+- 函数 `__name__` 属性
 
 **字符串、列表、字典、集合、元组**
 
@@ -183,6 +186,7 @@ or < and < not < 比较(含 in/is) < | < ^ < & < 移位 < +- < */ // % < 一元 
 | `tests/13.py` | `math` 增强：三角/反三角/双曲、`log1p/expm1`、`erf/erfc/gamma`、`isqrt/dist/comb/perm/lcm/prod`、`isfinite/isinf/isnan`、`remainder/nextafter/frexp`；`os` 增强：`sep/name/getcwd/environ/getenv`、`os.path` 全套方法 |
 | `tests/14.py` | 类型转换与数值操作：`int/long/float/str/repr/tuple/list/chr/ord/hex/oct/bin`（含 `base` 进制、字符串参数、布尔转换） |
 | `tests/15.py` | 字符串增强与格式化：printf 风格 `%s %d %x %f`（宽度/精度/对齐/符号/`#`/字典映射）、新增方法 `partition/rpartition/istitle/isnumeric/isdecimal/casefold/removeprefix/removesuffix/expandtabs`、`str.format` 自动编号/位置/关键字/格式说明符 |
+| `tests/16.py` | `nonlocal` 闭包计数、调用处 `*args/**kwargs` 展开、装饰器（堆叠/带参/透传/记录调用）、函数 `__name__` |
 | `example.py` | 综合示例（脚本级冒烟测试） |
 
 ## 实现要点与已知取舍
@@ -192,7 +196,7 @@ or < and < not < 比较(含 in/is) < | < ^ < & < 移位 < +- < */ // % < 一元 
 - **UTF-8**：词法分析按字节扫描，多字节字符必须原样输出（`string([]byte{c})`），不能走 `string(c)` 的 code point 转换，否则中文会变成乱码。
 - **数字精度**：使用 Go `int` / `float64`，因此没有 Python 的任意精度整数；超大整数运算与 CPython 行为可能存在差异。
 - **`newExc` 格式化**：内部使用 `fmt.Sprintf`，错误信息中的字面量 `%` 必须写成 `%%`，否则会被误判为格式动词。
-- **尚未实现**：`with` 语句、生成器与 `yield`、装饰器、多继承、关键字-only 参数、`global` 之外的 `nonlocal`、模块文件导入（只能导入内置模块）。
+- **尚未实现**：`with` 语句、生成器与 `yield`、多继承、关键字-only 参数、模块文件导入（只能导入内置模块）。
 
 ## 常见问题
 

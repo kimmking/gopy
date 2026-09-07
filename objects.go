@@ -203,6 +203,8 @@ type Environment struct {
 	global *Environment
 	// declaredGlobal 记录本帧中被 global 声明的名字
 	declaredGlobal map[string]bool
+	// declaredNonlocal 记录本帧中被 nonlocal 声明的名字
+	declaredNonlocal map[string]bool
 }
 
 func NewEnvironment(parent *Environment) *Environment {

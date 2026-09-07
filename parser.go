@@ -259,10 +259,41 @@ func (p *Parser) parseStatement() Stmt {
 		}
 		p.endSimple()
 		return st
+	case p.atKw("nonlocal"):
+		p.advance()
+		st := &NonlocalStmt{}
+		st.Names = append(st.Names, p.expectName())
+		for p.acceptOp(",") {
+			st.Names = append(st.Names, p.expectName())
+		}
+		p.endSimple()
+		return st
+	case p.atOp("@"):
+		return p.parseDecorated()
 	}
 	st := p.parseSimpleStmtRaw()
 	p.endSimple()
 	return st
+}
+
+// parseDecorated 解析 @decorator 装饰器（可堆叠）+ def/class
+func (p *Parser) parseDecorated() Stmt {
+	var decs []Expr
+	for p.atOp("@") {
+		p.advance()
+		decs = append(decs, p.parsePostfix())
+		p.endSimple()
+	}
+	var st Stmt
+	switch {
+	case p.atKw("def"):
+		st = p.parseFuncDef()
+	case p.atKw("class"):
+		st = p.parseClassDef()
+	default:
+		p.fail("装饰器后应为 def 或 class")
+	}
+	return &DecoratedStmt{Decorators: decs, Target: st}
 }
 
 // parseBlock 解析一个缩进块（也支持 `if x: pass` 这样的单行块）
@@ -742,7 +773,14 @@ func (p *Parser) parsePostfix() Expr {
 func (p *Parser) parseCallArgs() []CallArg {
 	var args []CallArg
 	for !p.atOp(")") && !p.atEnd() {
-		if p.at(TkName) && p.peekAt(1).Type == TkOp && p.peekAt(1).Text == "=" {
+		if p.atOp("*") || p.atOp("**") {
+			star2 := p.atOp("**")
+			p.advance()
+			if star2 && p.atOp("*") {
+				p.fail("调用参数中不能出现 ***")
+			}
+			args = append(args, CallArg{Star: !star2, Star2: star2, Value: p.parseConditional()})
+		} else if p.at(TkName) && p.peekAt(1).Type == TkOp && p.peekAt(1).Text == "=" {
 			name := p.advance().Text
 			p.advance()
 			args = append(args, CallArg{Name: name, Value: p.parseConditional()})

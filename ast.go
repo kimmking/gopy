@@ -133,6 +133,26 @@ type DeleteStmt struct{ Targets []Expr }
 // GlobalStmt 声明全局变量
 type GlobalStmt struct{ Names []string }
 
+// NonlocalStmt 声明变量绑定到最近的外层函数作用域
+type NonlocalStmt struct{ Names []string }
+
+// DecoratedStmt 带装饰器的 def/class 定义
+type DecoratedStmt struct {
+	Decorators []Expr
+	Target     Stmt
+}
+
+// decoratedName 返回被装饰目标的名字
+func (d *DecoratedStmt) decoratedName() string {
+	switch t := d.Target.(type) {
+	case *FuncDef:
+		return t.Name
+	case *ClassDef:
+		return t.Name
+	}
+	return ""
+}
+
 func (*Program) stmt()        {}
 func (*ExprStmt) stmt()       {}
 func (*Assign) stmt()         {}
@@ -153,6 +173,8 @@ func (*RaiseStmt) stmt()      {}
 func (*AssertStmt) stmt()     {}
 func (*DeleteStmt) stmt()     {}
 func (*GlobalStmt) stmt()     {}
+func (*NonlocalStmt) stmt()   {}
+func (*DecoratedStmt) stmt()  {}
 
 // ---------- 表达式 ----------
 
@@ -234,10 +256,13 @@ type Compare struct {
 	Comps []Expr
 }
 
-// CallArg 调用实参，Name 非空表示关键字参数
+// CallArg 调用实参，Name 非空表示关键字参数；
+// Star / Star2 表示调用处的 *iterable 与 **mapping 展开（Value 为名字表达式）
 type CallArg struct {
 	Name  string
 	Value Expr
+	Star  bool
+	Star2 bool
 }
 
 type Call struct {
