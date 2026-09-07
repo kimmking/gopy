@@ -133,8 +133,11 @@ type FromImportStmt struct {
 	Names  []ImportAlias
 }
 
-// RaiseStmt 主动抛出异常
-type RaiseStmt struct{ Value Expr }
+// RaiseStmt 主动抛出异常，Cause 为 `raise ... from ...` 的原因表达式
+type RaiseStmt struct {
+	Value Expr
+	Cause Expr
+}
 
 // AssertStmt 断言语句
 type AssertStmt struct {

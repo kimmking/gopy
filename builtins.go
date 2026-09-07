@@ -151,7 +151,7 @@ var orderedDictMethods = map[string]MethodFn{
 		key := args[0]
 		v, ok := od.D.Get(key)
 		if !ok {
-			return nil, newExc("KeyError", "%s", Repr(key))
+			return nil, keyError(key)
 		}
 		od.D.Delete(key)
 		od.D.Set(key, v)
@@ -1060,7 +1060,7 @@ var dictMethods = map[string]MethodFn{
 		if len(args) >= 2 {
 			return args[1], nil
 		}
-		return nil, newExc("KeyError", "%s", Repr(args[0]))
+		return nil, keyError(args[0])
 	},
 	"setdefault": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
 		if len(args) < 1 {
@@ -1153,7 +1153,7 @@ var setMethods = map[string]MethodFn{
 		}
 		s := recv.(*Set)
 		if !s.Has(args[0]) {
-			return nil, newExc("KeyError", "%s", Repr(args[0]))
+			return nil, keyError(args[0])
 		}
 		s.Remove(args[0])
 		return None, nil
@@ -2111,6 +2111,9 @@ func minMax(items []Object, wantMax bool, kwargs map[string]Object) (Object, err
 func isInstanceOf(obj Object, cls Object) bool {
 	switch c := cls.(type) {
 	case *Class:
+		if pe, ok := obj.(*PyException); ok {
+			return exceptionClassMatches(pe, c)
+		}
 		inst, ok := obj.(*Instance)
 		if !ok {
 			return false
@@ -2122,6 +2125,19 @@ func isInstanceOf(obj Object, cls Object) bool {
 		}
 		return false
 	case *PyType:
+		if pe, ok := obj.(*PyException); ok {
+			if exceptionNameMatches(pe.ExcType, c.Name) {
+				return true
+			}
+			if pe.Cls != nil {
+				for _, cur := range pe.Cls.MRO {
+					if cur.ExcBase != "" && exceptionNameMatches(cur.ExcBase, c.Name) {
+						return true
+					}
+				}
+			}
+			return false
+		}
 		return typeName(obj) == c.Name
 	case *Tuple:
 		for _, it := range c.Items {
@@ -2149,11 +2165,13 @@ func isSubclassOf(sub, parent Object) bool {
 		}
 		return false
 	case *PyType:
-		s, ok := sub.(*PyType)
-		if !ok {
-			return false
+		if s, ok := sub.(*PyType); ok {
+			return exceptionNameMatches(s.Name, p.Name)
 		}
-		return s.Name == p.Name
+		if s, ok := sub.(*Class); ok {
+			return classMatchesExcName(s, p.Name)
+		}
+		return false
 	case *Tuple:
 		for _, it := range p.Items {
 			if isSubclassOf(sub, it) {
@@ -3524,6 +3542,78 @@ func isExceptionTypeName(name string) bool {
 		}
 	}
 	return false
+}
+
+// excParents 内建异常类型的继承链
+var excParents = map[string]string{
+	"ValueError":         "Exception",
+	"TypeError":          "Exception",
+	"IndexError":         "LookupError",
+	"KeyError":           "LookupError",
+	"LookupError":        "Exception",
+	"ZeroDivisionError":  "ArithmeticError",
+	"ArithmeticError":    "Exception",
+	"NameError":          "Exception",
+	"AttributeError":     "Exception",
+	"RuntimeError":       "Exception",
+	"NotImplementedError": "RuntimeError",
+	"RecursionError":     "RuntimeError",
+	"StopIteration":      "Exception",
+	"AssertionError":     "Exception",
+	"FileNotFoundError":  "OSError",
+	"OSError":            "Exception",
+	"ImportError":        "Exception",
+	"SyntaxError":        "Exception",
+	"OverflowError":      "ArithmeticError",
+	"Exception":          "BaseException",
+}
+
+// exceptionNameMatches 判断异常类型名 name 是否为 target 或其基类链上的类型
+func exceptionNameMatches(name, target string) bool {
+	if name == target {
+		return true
+	}
+	for p, ok := excParents[name]; ok; p, ok = excParents[p] {
+		if p == target {
+			return true
+		}
+	}
+	return false
+}
+
+// classMatchesExcName 判断用户异常类（或其 MRO）是否继承自内建异常类型 name
+func classMatchesExcName(c *Class, name string) bool {
+	for _, cur := range c.MRO {
+		if cur.Name == name {
+			return true
+		}
+		if cur.ExcBase != "" && exceptionNameMatches(cur.ExcBase, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// keyError 构造 KeyError（str(e) 显示 key 的 repr）
+func keyError(key Object) error {
+	return &PyException{ExcType: "KeyError", Msg: Repr(key), Args: []Object{key}}
+}
+
+// exceptionClassMatches 判断异常实例是否匹配用户异常类 c
+func exceptionClassMatches(pe *PyException, c *Class) bool {
+	if pe.Cls != nil {
+		for _, cur := range pe.Cls.MRO {
+			if cur == c {
+				return true
+			}
+		}
+		for _, cur := range pe.Cls.MRO {
+			if cur.ExcBase != "" && exceptionNameMatches(cur.ExcBase, c.Name) {
+				return true
+			}
+		}
+	}
+	return exceptionNameMatches(pe.ExcType, c.Name)
 }
 
 // initGlobalEnv 初始化全局作用域

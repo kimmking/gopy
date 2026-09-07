@@ -196,6 +196,10 @@ type Class struct {
 	MRO     []*Class
 	Methods map[string]*Function
 	Attrs   map[string]Object
+	// IsException 标记异常类（基类为内建异常类型或用户异常类）
+	IsException bool
+	// ExcBase 记录最近一个内建异常基类名（供 except 匹配）
+	ExcBase string
 }
 
 // LookupMethod 沿 MRO 查找方法
@@ -440,6 +444,12 @@ type PyException struct {
 	ExcType string
 	Msg     string
 	Trace   []string
+	// Args 保存构造参数（e.args），nil 表示内部错误（使用 Msg）
+	Args []Object
+	// Cls 指向用户自定义异常类（nil 表示内建异常类型）
+	Cls *Class
+	// Cause 保存 raise ... from ... 的原因异常
+	Cause Object
 }
 
 func (e *PyException) Error() string {
@@ -450,7 +460,8 @@ func (e *PyException) Error() string {
 }
 
 func newExc(t, format string, args ...interface{}) error {
-	return &PyException{ExcType: t, Msg: fmt.Sprintf(format, args...)}
+	msg := fmt.Sprintf(format, args...)
+	return &PyException{ExcType: t, Msg: msg, Args: []Object{msg}}
 }
 
 // ============ 类型转换与判定 ============
@@ -838,12 +849,40 @@ func Repr(v Object) string {
 		return fmt.Sprintf("CacheInfo(hits=%d, misses=%d, maxsize=%d, currsize=%d)",
 			x.Hits, x.Misses, x.Maxsize, x.Currsize)
 	case *PyException:
-		if x.Msg == "" {
-			return x.ExcType + "()"
-		}
-		return x.ExcType + "(" + quoteString(x.Msg) + ")"
+		return excRepr(x)
 	}
 	return fmt.Sprintf("%v", v)
+}
+
+// excStr 实现 str(exc)：单参数直接显示，多参数显示元组形式
+func excStr(e *PyException) string {
+	if e.Args == nil {
+		return e.Msg
+	}
+	switch len(e.Args) {
+	case 0:
+		return ""
+	case 1:
+		if e.ExcType == "KeyError" {
+			// CPython 中 KeyError 的 __str__ 显示参数的 repr
+			return Repr(e.Args[0])
+		}
+		return Str(e.Args[0])
+	default:
+		return Repr(&Tuple{Items: e.Args})
+	}
+}
+
+// excRepr 实现 repr(exc)：显示类型名与构造参数
+func excRepr(e *PyException) string {
+	if len(e.Args) == 0 {
+		return e.ExcType + "()"
+	}
+	parts := make([]string, len(e.Args))
+	for i, a := range e.Args {
+		parts[i] = Repr(a)
+	}
+	return e.ExcType + "(" + strings.Join(parts, ", ") + ")"
 }
 
 // Str 生成 Python str()：字符串本身不加引号，异常只输出消息，实例优先 __str__，容器沿用 repr
@@ -852,7 +891,7 @@ func Str(v Object) string {
 	case string:
 		return x
 	case *PyException:
-		return x.Msg
+		return excStr(x)
 	case *Instance:
 		return instanceToString(x)
 	}

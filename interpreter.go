@@ -714,11 +714,27 @@ func (i *Interpreter) execClassDef(st *ClassDef) error {
 		if err != nil {
 			return err
 		}
-		bcls, ok := bv.(*Class)
-		if !ok {
+		switch b := bv.(type) {
+		case *Class:
+			bases = append(bases, b)
+			if b.IsException {
+				cls.IsException = true
+				if cls.ExcBase == "" {
+					cls.ExcBase = b.ExcBase
+				}
+			}
+		case *PyType:
+			if isExceptionTypeName(b.Name) {
+				cls.IsException = true
+				if cls.ExcBase == "" {
+					cls.ExcBase = b.Name
+				}
+				continue
+			}
+			return newExc("TypeError", "基类必须是类，实际为 '%s'", typeName(bv))
+		default:
 			return newExc("TypeError", "基类必须是类，实际为 '%s'", typeName(bv))
 		}
-		bases = append(bases, bcls)
 	}
 	cls.Bases = bases
 	mro, err := computeMRO(cls, bases)
@@ -786,6 +802,13 @@ func (i *Interpreter) execClassDef(st *ClassDef) error {
 	return nil
 }
 
+// makeUserException 构造用户自定义异常实例
+func makeUserException(cls *Class, args []Object) *PyException {
+	e := makeBuiltinException(cls.Name, args)
+	e.Cls = cls
+	return e
+}
+
 func (i *Interpreter) evalDefaults(params []Param) ([]Object, error) {
 	var defaults []Object
 	for _, p := range params {
@@ -802,7 +825,21 @@ func (i *Interpreter) evalDefaults(params []Param) ([]Object, error) {
 	return defaults, nil
 }
 
+// makeBuiltinException 构造内建异常实例（不立即抛出，可先创建再 raise）
+func makeBuiltinException(name string, args []Object) *PyException {
+	msg := ""
+	if len(args) > 0 {
+		msg = Str(args[0])
+	} else {
+		args = []Object{}
+	}
+	return &PyException{ExcType: name, Msg: msg, Args: args}
+}
+
 func (i *Interpreter) instantiate(cls *Class, args []Object, kwargs map[string]Object) (Object, error) {
+	if cls.IsException {
+		return makeUserException(cls, args), nil
+	}
 	inst := &Instance{Class: cls, Fields: map[string]Object{}}
 	if fn, ok := cls.LookupMethod("__init__"); ok {
 		all := make([]Object, 0, len(args)+1)
@@ -897,13 +934,42 @@ func (i *Interpreter) execRaise(st *RaiseStmt) error {
 	if err != nil {
 		return err
 	}
+	// raise ... from ...：记录原因异常
+	var cause Object
+	if st.Cause != nil {
+		cv, cerr := i.eval(st.Cause)
+		if cerr != nil {
+			return cerr
+		}
+		cause = cv
+	}
 	switch x := v.(type) {
 	case *PyException:
+		if cause != nil {
+			x.Cause = cause
+		}
 		return x
 	case *PyType:
-		return &PyException{ExcType: x.Name}
+		e := makeBuiltinException(x.Name, nil)
+		if cause != nil {
+			e.Cause = cause
+		}
+		return e
+	case *Class:
+		if x.IsException {
+			e := makeUserException(x, nil)
+			if cause != nil {
+				e.Cause = cause
+			}
+			return e
+		}
+		return newExc("TypeError", "异常必须继承自 BaseException，实际为 '%s'", typeName(v))
 	case string:
-		return &PyException{ExcType: "Exception", Msg: x}
+		e := makeBuiltinException("Exception", []Object{x})
+		if cause != nil {
+			e.Cause = cause
+		}
+		return e
 	}
 	return newExc("TypeError", "异常必须继承自 BaseException，实际为 '%s'", typeName(v))
 }
@@ -1434,7 +1500,7 @@ func (i *Interpreter) getItem(obj, key Object) (Object, error) {
 		if v, ok := x.Get(key); ok {
 			return v, nil
 		}
-		return nil, newExc("KeyError", "%s", Repr(key))
+		return nil, keyError(key)
 	case *Range:
 		n, ok := intVal(key)
 		if !ok {
@@ -1467,7 +1533,7 @@ func (i *Interpreter) getItem(obj, key Object) (Object, error) {
 		if v, ok := x.D.Get(key); ok {
 			return v, nil
 		}
-		return nil, newExc("KeyError", "%s", Repr(key))
+		return nil, keyError(key)
 	case *PyDeque:
 		n, ok := intVal(key)
 		if !ok {
@@ -1673,9 +1739,29 @@ func getAttr(obj Object, name string) (Object, error) {
 	case *PyException:
 		switch name {
 		case "args":
-			return &Tuple{Items: []Object{x.Msg}}, nil
+			items := x.Args
+			if items == nil {
+				items = []Object{x.Msg}
+			}
+			return &Tuple{Items: items}, nil
 		case "__class__":
+			if x.Cls != nil {
+				return x.Cls, nil
+			}
 			return &PyType{Name: x.ExcType}, nil
+		case "__cause__":
+			if x.Cause != nil {
+				return x.Cause, nil
+			}
+			return None, nil
+		}
+		if x.Cls != nil {
+			// 用户异常类上的方法/属性
+			for _, cur := range x.Cls.MRO {
+				if fn, ok := cur.Methods[name]; ok {
+					return &Method{Recv: Object(x), Fn: fn}, nil
+				}
+			}
 		}
 		return nil, newExc("AttributeError", "'%s' 对象没有属性 '%s'", x.ExcType, name)
 	}
@@ -1794,11 +1880,7 @@ func (i *Interpreter) callObject(fn Object, args []Object, kwargs map[string]Obj
 		return nil, newExc("TypeError", "'%s' 对象不可调用", f.Class.Name)
 	case *PyType:
 		if isExceptionTypeName(f.Name) {
-			msg := ""
-			if len(args) > 0 {
-				msg = Str(args[0])
-			}
-			return nil, &PyException{ExcType: f.Name, Msg: msg}
+			return makeBuiltinException(f.Name, args), nil
 		}
 		if b, ok := builtinFuncs[strings.ToLower(f.Name)]; ok {
 			return b(args, kwargs)

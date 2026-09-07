@@ -240,6 +240,9 @@ func (p *Parser) parseStatement() Stmt {
 		st := &RaiseStmt{}
 		if !p.atEnd() {
 			st.Value = p.parseExpr()
+			if p.acceptKw("from") {
+				st.Cause = p.parseExpr()
+			}
 		}
 		p.endSimple()
 		return st
@@ -442,10 +445,13 @@ func (p *Parser) parseTry() Stmt {
 		clause.Body = p.parseBlock()
 		st.Handlers = append(st.Handlers, clause)
 	}
-	if len(st.Handlers) == 0 {
+	if len(st.Handlers) == 0 && !p.atKw("finally") {
 		p.fail("try 语句缺少 except 或 finally")
 	}
 	if p.atKw("else") {
+		if len(st.Handlers) == 0 {
+			p.fail("try/else 需要至少一个 except")
+		}
 		p.advance()
 		st.Else = p.parseBlock()
 	}

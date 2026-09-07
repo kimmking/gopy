@@ -37,7 +37,7 @@ go run . path/to/script.py
 ./test.sh
 ```
 
-当前状态：`tests/01.py` … `tests/22.py` 与 `example.py` **全部与 `python3` 输出完全一致**。
+当前状态：`tests/01.py` … `tests/23.py` 与 `example.py` **全部与 `python3` 输出完全一致**。
 
 ## 整体架构
 
@@ -153,8 +153,11 @@ or < and < not < 比较(含 in/is) < | < ^ < & < 移位 < +- < */ // % < 一元 
 **异常处理**
 
 - `try` / `except` / `except X as e` / `else` / `finally`
-- `raise ValueError("msg")`、`assert`
-- 内建异常类型：`ValueError TypeError IndexError KeyError ZeroDivisionError NameError AttributeError RuntimeError AssertionError NotImplementedError RecursionError ...`
+- `raise ValueError("msg")`、`raise X from Y`（`__cause__`）、`assert`、try/finally（无 except）
+- 自定义异常类：`class MyError(Exception)` 继承内建异常类型，`except` 按继承链匹配
+- 异常实例即对象：`e.args`、`str(e)`/`repr(e)`（KeyError 的 str 显示 key 的 repr）、`type(e).__name__`、可先创建再 raise
+- `except (A, B)` 元组匹配
+- 内建异常类型：`ValueError TypeError IndexError KeyError ZeroDivisionError NameError AttributeError RuntimeError AssertionError NotImplementedError RecursionError ...`（含 CPython 继承链，如 `issubclass(ValueError, Exception)`）
 - 未捕获的异常输出到 stderr 并以非零码退出，解释器本身不崩溃
 
 **模块**
@@ -209,6 +212,7 @@ or < and < not < 比较(含 in/is) < | < ^ < & < 移位 < +- < */ // % < 一元 
 | `tests/20.py` | 多继承 C3 MRO、零参 `super()`（方法链/菱形协作 `__init__`/类方法中）、`isinstance`/`issubclass`、Mixin |
 | `tests/21.py` | collections：Counter（计数/most_common/elements/update）、defaultdict（list/int/str 工厂）、OrderedDict（move_to_end/popitem）、deque（双端操作/rotate） |
 | `tests/22.py` | functools：reduce/partial/lru_cache（含递归缓存与 cache_info）；itertools：count/cycle/repeat/chain/islice/accumulate/product/permutations/combinations/takewhile/dropwhile/starmap；括号 from-import |
+| `tests/23.py` | 自定义异常类继承链匹配、`e.args`、`raise from` 与 `__cause__`、except 元组、异常实例即对象（str/repr）、try/finally return 覆盖 |
 | `example.py` | 综合示例（脚本级冒烟测试） |
 
 ## 实现要点与已知取舍
