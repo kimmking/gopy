@@ -348,6 +348,34 @@ type PyOrderedDict struct{ D *Dict }
 // PyDeque collections.deque
 type PyDeque struct{ Items []Object }
 
+// PyIter 惰性迭代器（itertools 家族），Next 返回 (值, 是否有值, 错误)
+type PyIter struct {
+	Label string
+	Next  func() (Object, bool, error)
+}
+
+// PyPartial functools.partial：预绑定参数的可调用对象
+type PyPartial struct {
+	Fn     Object
+	Args   []Object
+	Kwargs map[string]Object
+}
+
+// PyLRU functools.lru_cache 包装的可调用对象
+type PyLRU struct {
+	Fn      Object
+	Name    string
+	Maxsize int
+	Cache   *Dict
+	Hits    int
+	Misses  int
+}
+
+// PyCacheInfo lru_cache 的 cache_info() 返回值
+type PyCacheInfo struct {
+	Hits, Misses, Maxsize, Currsize int
+}
+
 // PyType 表示类型对象（内建类型与异常类）
 type PyType struct {
 	Name string
@@ -485,6 +513,14 @@ func typeName(v Object) string {
 		return "OrderedDict"
 	case *PyDeque:
 		return "deque"
+	case *PyIter:
+		return x.Label
+	case *PyPartial:
+		return "functools.partial"
+	case *PyLRU:
+		return "functools._lru_cache_wrapper"
+	case *PyCacheInfo:
+		return "CacheInfo"
 	}
 	return "object"
 }
@@ -798,6 +834,9 @@ func Repr(v Object) string {
 			parts[i] = Repr(it)
 		}
 		return "deque([" + strings.Join(parts, ", ") + "])"
+	case *PyCacheInfo:
+		return fmt.Sprintf("CacheInfo(hits=%d, misses=%d, maxsize=%d, currsize=%d)",
+			x.Hits, x.Misses, x.Maxsize, x.Currsize)
 	case *PyException:
 		if x.Msg == "" {
 			return x.ExcType + "()"
@@ -1790,6 +1829,18 @@ func iterate(v Object) ([]Object, error) {
 		return out, nil
 	case *PyDeque:
 		return x.Items, nil
+	case *PyIter:
+		var out []Object
+		for {
+			v, ok, err := x.Next()
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				return out, nil
+			}
+			out = append(out, v)
+		}
 	}
 	return nil, newExc("TypeError", "'%s' 对象不可迭代", typeName(v))
 }

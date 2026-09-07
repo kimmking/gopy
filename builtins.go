@@ -1885,24 +1885,36 @@ var builtinFuncs = map[string]BuiltinFn{
 		if len(args) < 1 {
 			return nil, argCountErr("next", len(args), 1)
 		}
-		g, ok := args[0].(*Generator)
-		if !ok {
-			return nil, newExc("TypeError", "next() 的参数必须是生成器，实际为 '%s'", typeName(args[0]))
-		}
-		if activeInterp == nil {
-			return nil, newExc("RuntimeError", "解释器尚未初始化")
-		}
-		v, has, err := genNextRef(activeInterp, g)
-		if err != nil {
-			return nil, err
-		}
-		if !has {
-			if len(args) >= 2 {
-				return args[1], nil
+		if g, ok := args[0].(*Generator); ok {
+			if activeInterp == nil {
+				return nil, newExc("RuntimeError", "解释器尚未初始化")
 			}
-			return nil, newExc("StopIteration", "")
+			v, has, err := genNextRef(activeInterp, g)
+			if err != nil {
+				return nil, err
+			}
+			if !has {
+				if len(args) >= 2 {
+					return args[1], nil
+				}
+				return nil, newExc("StopIteration", "")
+			}
+			return v, nil
 		}
-		return v, nil
+		if it, ok := args[0].(*PyIter); ok {
+			v, has, err := it.Next()
+			if err != nil {
+				return nil, err
+			}
+			if !has {
+				if len(args) >= 2 {
+					return args[1], nil
+				}
+				return nil, newExc("StopIteration", "")
+			}
+			return v, nil
+		}
+		return nil, newExc("TypeError", "next() 的参数必须是迭代器，实际为 '%s'", typeName(args[0]))
 	},
 	"iter": func(args []Object, kwargs map[string]Object) (Object, error) {
 		if len(args) != 1 {
@@ -3007,6 +3019,495 @@ func newCollectionsModule() *Module {
 	return m
 }
 
+// newFunctoolsModule 构造 functools 模块
+func newFunctoolsModule() *Module {
+	m := &Module{Name: "functools", Attrs: map[string]Object{}}
+	bind := func(name string, fn func(args []Object, kwargs map[string]Object) (Object, error)) {
+		m.Attrs[name] = &Builtin{Name: "functools." + name, Fn: fn}
+	}
+	bind("reduce", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 2 {
+			return nil, argCountErr("reduce", len(args), 2)
+		}
+		items, err := iterate(args[1])
+		if err != nil {
+			return nil, err
+		}
+		var acc Object
+		start := 0
+		if len(args) >= 3 {
+			acc = args[2]
+		} else {
+			if len(items) == 0 {
+				return nil, newExc("TypeError", "reduce() of empty iterable with no initial value")
+			}
+			acc = items[0]
+			start = 1
+		}
+		for _, it := range items[start:] {
+			acc, err = callObjectRef(args[0], []Object{acc, it}, nil)
+			if err != nil {
+				return nil, err
+			}
+		}
+		return acc, nil
+	})
+	bind("partial", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, argCountErr("partial", len(args), 1)
+		}
+		return &PyPartial{Fn: args[0], Args: args[1:], Kwargs: kwargs}, nil
+	})
+	bind("lru_cache", func(args []Object, kwargs map[string]Object) (Object, error) {
+		maxsize := 128
+		var target Object
+		if len(args) == 1 {
+			if _, isFn := args[0].(*Function); isFn {
+				target = args[0]
+			} else if n, ok := intVal(args[0]); ok {
+				maxsize = n
+			}
+		}
+		if target == nil {
+			// 作为装饰器工厂使用：返回一个包装函数
+			factory := func(decoArgs []Object, decoKwargs map[string]Object) (Object, error) {
+				if len(decoArgs) != 1 {
+					return nil, argCountErr("lru_cache", len(decoArgs), 1)
+				}
+				return makeLRU(decoArgs[0], maxsize), nil
+			}
+			return &Builtin{Name: "functools.lru_cache", Fn: factory}, nil
+		}
+		return makeLRU(target, maxsize), nil
+	})
+	return m
+}
+
+func makeLRU(fn Object, maxsize int) *PyLRU {
+	name := ""
+	if f, ok := fn.(*Function); ok {
+		name = f.Name
+	}
+	return &PyLRU{Fn: fn, Name: name, Maxsize: maxsize, Cache: NewDict()}
+}
+
+// newItertoolsModule 构造 itertools 模块
+func newItertoolsModule() *Module {
+	m := &Module{Name: "itertools", Attrs: map[string]Object{}}
+	bind := func(name string, fn func(args []Object, kwargs map[string]Object) (Object, error)) {
+		m.Attrs[name] = &Builtin{Name: "itertools." + name, Fn: fn}
+	}
+	bind("count", func(args []Object, kwargs map[string]Object) (Object, error) {
+		start, step := 0, 1
+		if len(args) >= 1 {
+			if v, ok := intVal(args[0]); ok {
+				start = v
+			}
+		}
+		if len(args) >= 2 {
+			if v, ok := intVal(args[1]); ok {
+				step = v
+			}
+		}
+		i := start
+		return &PyIter{Label: "itertools.count", Next: func() (Object, bool, error) {
+			v := i
+			i += step
+			return v, true, nil
+		}}, nil
+	})
+	bind("cycle", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, argCountErr("cycle", len(args), 1)
+		}
+		items, err := iterate(args[0])
+		if err != nil {
+			return nil, err
+		}
+		idx := 0
+		return &PyIter{Label: "itertools.cycle", Next: func() (Object, bool, error) {
+			if len(items) == 0 {
+				return nil, false, nil
+			}
+			v := items[idx%len(items)]
+			idx++
+			return v, true, nil
+		}}, nil
+	})
+	bind("repeat", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, argCountErr("repeat", len(args), 1)
+		}
+		n := -1
+		if len(args) >= 2 {
+			if v, ok := intVal(args[1]); ok {
+				n = v
+			}
+		}
+		done := 0
+		return &PyIter{Label: "itertools.repeat", Next: func() (Object, bool, error) {
+			if n >= 0 && done >= n {
+				return nil, false, nil
+			}
+			done++
+			return args[0], true, nil
+		}}, nil
+	})
+	bind("chain", func(args []Object, kwargs map[string]Object) (Object, error) {
+		eager := make([][]Object, len(args))
+		for i, a := range args {
+			items, err := iterate(a)
+			if err != nil {
+				return nil, err
+			}
+			eager[i] = items
+		}
+		outer, inner := 0, 0
+		return &PyIter{Label: "itertools.chain", Next: func() (Object, bool, error) {
+			for outer < len(eager) {
+				if inner < len(eager[outer]) {
+					v := eager[outer][inner]
+					inner++
+					return v, true, nil
+				}
+				outer++
+				inner = 0
+			}
+			return nil, false, nil
+		}}, nil
+	})
+	bind("islice", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 2 {
+			return nil, argCountErr("islice", len(args), 2)
+		}
+		src, ok := args[0].(*PyIter)
+		if !ok {
+			// 有限可迭代对象：物化为迭代器
+			items, err := iterate(args[0])
+			if err != nil {
+				return nil, err
+			}
+			pos := 0
+			src = &PyIter{Next: func() (Object, bool, error) {
+				if pos >= len(items) {
+					return nil, false, nil
+				}
+				v := items[pos]
+				pos++
+				return v, true, nil
+			}}
+		}
+		var start, stop, step int
+		switch len(args) {
+		case 2:
+			start, stop, step = 0, mustInt(args[1]), 1
+		case 3:
+			start, stop, step = mustInt(args[1]), mustInt(args[2]), 1
+		default:
+			start, stop, step = mustInt(args[1]), mustInt(args[2]), mustInt(args[3])
+		}
+		if step <= 0 {
+			return nil, newExc("ValueError", "islice() 的步长必须是正整数")
+		}
+		pos := 0
+		return &PyIter{Label: "itertools.islice", Next: func() (Object, bool, error) {
+			for {
+				v, ok, err := src.Next()
+				if err != nil {
+					return nil, false, err
+				}
+				if !ok {
+					return nil, false, nil
+				}
+				take := pos >= start && (pos-start)%step == 0 && (stop < 0 || pos < stop)
+				pos++
+				if take {
+					return v, true, nil
+				}
+				if stop >= 0 && pos >= stop && pos >= start {
+					// 越过 stop 之后立即结束
+					if pos >= stop {
+						// 仍需消费到 stop 之前的元素，但已无产出
+						return nil, false, nil
+					}
+				}
+			}
+		}}, nil
+	})
+	bind("accumulate", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, argCountErr("accumulate", len(args), 1)
+		}
+		items, err := iterate(args[0])
+		if err != nil {
+			return nil, err
+		}
+		var fn Object
+		if len(args) >= 2 {
+			fn = args[1]
+		}
+		idx := 0
+		var acc Object
+		return &PyIter{Label: "itertools.accumulate", Next: func() (Object, bool, error) {
+			if idx >= len(items) {
+				return nil, false, nil
+			}
+			if idx == 0 {
+				acc = items[0]
+			} else if fn != nil {
+				v, err := callObjectRef(fn, []Object{acc, items[idx]}, nil)
+				if err != nil {
+					return nil, false, err
+				}
+				acc = v
+			} else {
+				v, err := binaryOp("+", acc, items[idx])
+				if err != nil {
+					return nil, false, err
+				}
+				acc = v
+			}
+			idx++
+			return acc, true, nil
+		}}, nil
+	})
+	bind("product", func(args []Object, kwargs map[string]Object) (Object, error) {
+		pools := make([][]Object, len(args))
+		for i, a := range args {
+			items, err := iterate(a)
+			if err != nil {
+				return nil, err
+			}
+			pools[i] = items
+		}
+		total := 1
+		for _, p := range pools {
+			total *= len(p)
+		}
+		out := make([]Object, 0, total)
+		idx := make([]int, len(pools))
+		for {
+			if len(pools) == 0 {
+				break
+			}
+			t := make([]Object, len(pools))
+			for i, p := range pools {
+				t[i] = p[idx[i]]
+			}
+			out = append(out, &Tuple{Items: t})
+			// 进位
+			carry := false
+			for i := len(pools) - 1; i >= 0; i-- {
+				idx[i]++
+				if idx[i] < len(pools[i]) {
+					carry = false
+					break
+				}
+				idx[i] = 0
+				carry = true
+			}
+			if carry {
+				break
+			}
+		}
+		return listIter(out), nil
+	})
+	bind("permutations", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, argCountErr("permutations", len(args), 1)
+		}
+		items, err := iterate(args[0])
+		if err != nil {
+			return nil, err
+		}
+		r := len(items)
+		if len(args) >= 2 {
+			if v, ok := intVal(args[1]); ok {
+				r = v
+			}
+		}
+		out := []Object{}
+		var gen func(cur []Object, used []bool, k int)
+		gen = func(cur []Object, used []bool, k int) {
+			if k == r {
+				cp := make([]Object, r)
+				copy(cp, cur)
+				out = append(out, &Tuple{Items: cp})
+				return
+			}
+			for i := 0; i < len(items); i++ {
+				if used[i] {
+					continue
+				}
+				used[i] = true
+				gen(append(cur, items[i]), used, k+1)
+				used[i] = false
+			}
+		}
+		if r <= len(items) {
+			gen([]Object{}, make([]bool, len(items)), 0)
+		}
+		return listIter(out), nil
+	})
+	bind("combinations", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 2 {
+			return nil, argCountErr("combinations", len(args), 2)
+		}
+		items, err := iterate(args[0])
+		if err != nil {
+			return nil, err
+		}
+		r, ok := intVal(args[1])
+		if !ok {
+			return nil, newExc("TypeError", "combinations() 的第二个参数必须是整数")
+		}
+		out := []Object{}
+		var gen func(start int, cur []Object)
+		gen = func(start int, cur []Object) {
+			if len(cur) == r {
+				cp := make([]Object, r)
+				copy(cp, cur)
+				out = append(out, &Tuple{Items: cp})
+				return
+			}
+			for i := start; i < len(items); i++ {
+				gen(i+1, append(cur, items[i]))
+			}
+		}
+		if r >= 0 && r <= len(items) {
+			gen(0, []Object{})
+		}
+		return listIter(out), nil
+	})
+	bind("takewhile", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 2 {
+			return nil, argCountErr("takewhile", len(args), 2)
+		}
+		src, err := asIter(args[1])
+		if err != nil {
+			return nil, err
+		}
+		stopped := false
+		return &PyIter{Label: "itertools.takewhile", Next: func() (Object, bool, error) {
+			if stopped {
+				return nil, false, nil
+			}
+			v, ok, err := src.Next()
+			if err != nil || !ok {
+				return nil, false, err
+			}
+			pv, err := callObjectRef(args[0], []Object{v}, nil)
+			if err != nil {
+				return nil, false, err
+			}
+			if !truthy(pv) {
+				stopped = true
+				return nil, false, nil
+			}
+			return v, true, nil
+		}}, nil
+	})
+	bind("dropwhile", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 2 {
+			return nil, argCountErr("dropwhile", len(args), 2)
+		}
+		src, err := asIter(args[1])
+		if err != nil {
+			return nil, err
+		}
+		dropped := false
+		return &PyIter{Label: "itertools.dropwhile", Next: func() (Object, bool, error) {
+			for {
+				v, ok, err := src.Next()
+				if err != nil || !ok {
+					return nil, false, err
+				}
+				if dropped {
+					return v, true, nil
+				}
+				pv, err := callObjectRef(args[0], []Object{v}, nil)
+				if err != nil {
+					return nil, false, err
+				}
+				if !truthy(pv) {
+					dropped = true
+					return v, true, nil
+				}
+			}
+		}}, nil
+	})
+	bind("starmap", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 2 {
+			return nil, argCountErr("starmap", len(args), 2)
+		}
+		items, err := iterate(args[1])
+		if err != nil {
+			return nil, err
+		}
+		idx := 0
+		return &PyIter{Label: "itertools.starmap", Next: func() (Object, bool, error) {
+			if idx >= len(items) {
+				return nil, false, nil
+			}
+			p, ok := items[idx].(*Tuple)
+			idx++
+			if !ok {
+				return nil, false, newExc("TypeError", "starmap() 的元素必须是元组")
+			}
+			v, err := callObjectRef(args[0], p.Items, nil)
+			if err != nil {
+				return nil, false, err
+			}
+			return v, true, nil
+		}}, nil
+	})
+	return m
+}
+
+// listIter 返回物化列表上的迭代器
+func listIter(items []Object) *PyIter {
+	cp := make([]Object, len(items))
+	copy(cp, items)
+	pos := 0
+	return &PyIter{Next: func() (Object, bool, error) {
+		if pos >= len(cp) {
+			return nil, false, nil
+		}
+		v := cp[pos]
+		pos++
+		return v, true, nil
+	}}
+}
+
+// asIter 把可迭代对象转换为惰性迭代器
+func asIter(v Object) (*PyIter, error) {
+	if it, ok := v.(*PyIter); ok {
+		return it, nil
+	}
+	items, err := iterate(v)
+	if err != nil {
+		return nil, err
+	}
+	cp := make([]Object, len(items))
+	copy(cp, items)
+	pos := 0
+	return &PyIter{Next: func() (Object, bool, error) {
+		if pos >= len(cp) {
+			return nil, false, nil
+		}
+		x := cp[pos]
+		pos++
+		return x, true, nil
+	}}, nil
+}
+
+func mustInt(v Object) int {
+	if n, ok := intVal(v); ok {
+		return n
+	}
+	return 0
+}
+
 // exceptionTypeNames 是支持的内建异常类型
 var exceptionTypeNames = []string{
 	"Exception", "BaseException", "ValueError", "TypeError", "IndexError",
@@ -3035,6 +3536,8 @@ func initGlobalEnv(argv []Object) *Environment {
 	env.Set("os", newOsModule())
 	env.Set("sys", newSysModule(argv))
 	env.Set("collections", newCollectionsModule())
+	env.Set("functools", newFunctoolsModule())
+	env.Set("itertools", newItertoolsModule())
 	for _, name := range exceptionTypeNames {
 		env.Set(name, &PyType{Name: name})
 	}

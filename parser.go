@@ -514,7 +514,22 @@ func (p *Parser) parseFromImport() Stmt {
 		}
 	}
 	p.expectKw("import")
-	if p.acceptOp("*") {
+	if p.acceptOp("(") {
+		// 括号形式：from x import (a, b as c)
+		for !p.atOp(")") && !p.atEnd() {
+			name := p.expectName()
+			alias := ""
+			if p.acceptKw("as") {
+				alias = p.expectName()
+			}
+			st.Names = append(st.Names, ImportAlias{Path: []string{name}, Alias: alias})
+			if p.acceptOp(",") {
+				continue
+			}
+			break
+		}
+		p.expectOp(")")
+	} else if p.acceptOp("*") {
 		st.Names = append(st.Names, ImportAlias{Path: []string{"*"}})
 	} else {
 		for {

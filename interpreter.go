@@ -1658,6 +1658,18 @@ func getAttr(obj Object, name string) (Object, error) {
 			return v, nil
 		}
 		return nil, newExc("AttributeError", "'super' 对象没有属性 '%s'", name)
+	case *PyLRU:
+		switch name {
+		case "cache_info":
+			fn := func(args []Object, kwargs map[string]Object) (Object, error) {
+				return &PyCacheInfo{Hits: x.Hits, Misses: x.Misses,
+					Maxsize: x.Maxsize, Currsize: x.Cache.Len()}, nil
+			}
+			return &Builtin{Name: "cache_info", Fn: fn}, nil
+		case "__name__":
+			return x.Name, nil
+		}
+		return nil, newExc("AttributeError", "'functools._lru_cache_wrapper' 对象没有属性 '%s'", name)
 	case *PyException:
 		switch name {
 		case "args":
@@ -1746,6 +1758,31 @@ func (i *Interpreter) callObject(fn Object, args []Object, kwargs map[string]Obj
 		return callBuiltinMethod(f.Recv, f.Name, args, kwargs)
 	case *Class:
 		return i.instantiate(f, args, kwargs)
+	case *PyPartial:
+		all := make([]Object, 0, len(f.Args)+len(args))
+		all = append(all, f.Args...)
+		all = append(all, args...)
+		merged := map[string]Object{}
+		for k, v := range f.Kwargs {
+			merged[k] = v
+		}
+		for k, v := range kwargs {
+			merged[k] = v
+		}
+		return i.callObject(f.Fn, all, merged)
+	case *PyLRU:
+		key := keyOf(&Tuple{Items: args})
+		if v, ok := f.Cache.Get(key); ok {
+			f.Hits++
+			return v, nil
+		}
+		f.Misses++
+		v, err := i.callObject(f.Fn, args, kwargs)
+		if err != nil {
+			return nil, err
+		}
+		f.Cache.Set(key, v)
+		return v, nil
 	case *Instance:
 		// 实例可调用：走 __call__ 方法
 		if fn, ok := f.Class.LookupMethod("__call__"); ok {

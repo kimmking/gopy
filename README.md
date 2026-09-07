@@ -37,7 +37,7 @@ go run . path/to/script.py
 ./test.sh
 ```
 
-当前状态：`tests/01.py` … `tests/21.py` 与 `example.py` **全部与 `python3` 输出完全一致**。
+当前状态：`tests/01.py` … `tests/22.py` 与 `example.py` **全部与 `python3` 输出完全一致**。
 
 ## 整体架构
 
@@ -175,6 +175,10 @@ or < and < not < 比较(含 in/is) < | < ^ < & < 移位 < +- < */ // % < 一元 
 
 **`sys`**：`argv version platform exit`
 
+**`functools`**：`reduce partial lru_cache`（带 `cache_info()`，可作装饰器或装饰器工厂）
+
+**`itertools`**：`count cycle repeat chain islice accumulate product permutations combinations takewhile dropwhile starmap`（惰性迭代器，可被 `next` / `list` / `for` 消费）
+
 **`collections`**：`Counter`（`most_common elements update subtract`、缺失键返回 0、repr 按 most_common 排序）、`defaultdict`（缺失键调用工厂函数）、`OrderedDict`（`move_to_end popitem`）、`deque`（`append appendleft pop popleft extend extendleft rotate remove clear reverse copy index count`）
 
 ## 测试目录（回归用例）
@@ -204,6 +208,7 @@ or < and < not < 比较(含 in/is) < | < ^ < & < 移位 < +- < */ // % < 一元 
 | `tests/19.py` | 运算符重载（算术/反射/比较/`len`/下标/`in`/`__call__`/`__bool__`）、`__repr__`/`__str__` 分工、`@property`/`@staticmethod`/`@classmethod`、类属性赋值 |
 | `tests/20.py` | 多继承 C3 MRO、零参 `super()`（方法链/菱形协作 `__init__`/类方法中）、`isinstance`/`issubclass`、Mixin |
 | `tests/21.py` | collections：Counter（计数/most_common/elements/update）、defaultdict（list/int/str 工厂）、OrderedDict（move_to_end/popitem）、deque（双端操作/rotate） |
+| `tests/22.py` | functools：reduce/partial/lru_cache（含递归缓存与 cache_info）；itertools：count/cycle/repeat/chain/islice/accumulate/product/permutations/combinations/takewhile/dropwhile/starmap；括号 from-import |
 | `example.py` | 综合示例（脚本级冒烟测试） |
 
 ## 实现要点与已知取舍
