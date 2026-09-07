@@ -3687,6 +3687,451 @@ func mustInt(v Object) int {
 	return 0
 }
 
+// newJSONModule 构造 json 模块（dumps / loads）
+func newJSONModule() *Module {
+	m := &Module{Name: "json", Attrs: map[string]Object{}}
+	bind := func(name string, fn func(args []Object, kwargs map[string]Object) (Object, error)) {
+		m.Attrs[name] = &Builtin{Name: "json." + name, Fn: fn}
+	}
+	bind("dumps", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, argCountErr("dumps", len(args), 1)
+		}
+		opts := jsonOptions{ensureAscii: true, itemSep: ", ", keySep: ": "}
+		if v, ok := kwargs["ensure_ascii"]; ok {
+			opts.ensureAscii = truthy(v)
+		}
+		if v, ok := kwargs["sort_keys"]; ok {
+			opts.sortKeys = truthy(v)
+		}
+		if v, ok := kwargs["indent"]; ok {
+			if n, ok2 := intVal(v); ok2 && n > 0 {
+				opts.indent = strings.Repeat(" ", n)
+			}
+		}
+		if v, ok := kwargs["separators"]; ok {
+			if t, ok2 := v.(*Tuple); ok2 && len(t.Items) == 2 {
+				opts.itemSep = Str(t.Items[0])
+				opts.keySep = Str(t.Items[1])
+			}
+		}
+		if opts.indent != "" {
+			opts.itemSep = ","
+			opts.keySep = ": "
+		}
+		return jsonDump(args[0], &opts, ""), nil
+	})
+	bind("loads", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, argCountErr("loads", len(args), 1)
+		}
+		src, ok := args[0].(string)
+		if !ok {
+			return nil, newExc("TypeError", "loads() 需要字符串参数")
+		}
+		p := &jsonParser{src: src}
+		p.skipWS()
+		v, err := p.parseValue()
+		if err != nil {
+			return nil, err
+		}
+		p.skipWS()
+		if p.pos < len(p.src) {
+			return nil, newExc("ValueError", "Extra data at position %d", p.pos)
+		}
+		return v, nil
+	})
+	return m
+}
+
+// jsonOptions 保存 dumps 的选项
+type jsonOptions struct {
+	indent     string
+	itemSep    string
+	keySep     string
+	ensureAscii bool
+	sortKeys   bool
+}
+
+// jsonDump 把对象编码为 JSON 文本（curPrefix 为当前缩进前缀）
+func jsonDump(v Object, o *jsonOptions, curPrefix string) string {
+	switch x := v.(type) {
+	case nil:
+		return "null"
+	case *PyNone:
+		return "null"
+	case bool:
+		if x {
+			return "true"
+		}
+		return "false"
+	case int:
+		return strconv.Itoa(x)
+	case float64:
+		return formatFloat(x)
+	case string:
+		return jsonString(x, o.ensureAscii)
+	case *List:
+		if len(x.Items) == 0 {
+			return "[]"
+		}
+		parts := make([]string, len(x.Items))
+		for i, it := range x.Items {
+			parts[i] = jsonDump(it, o, curPrefix+o.indent)
+		}
+		return "[" + joinJSON(parts, o.itemSep, o.indent, curPrefix) + "]"
+	case *Tuple:
+		l := &List{Items: x.Items}
+		return jsonDump(l, o, curPrefix)
+	case *Dict:
+		return jsonDumpDict(x.Keys, func(k Object) Object { return x.Vals[keyOf(k)] }, o, curPrefix)
+	case *PyCounter:
+		return jsonDumpDict(x.D.Keys, func(k Object) Object { return x.D.Vals[keyOf(k)] }, o, curPrefix)
+	case *PyOrderedDict:
+		return jsonDumpDict(x.D.Keys, func(k Object) Object { return x.D.Vals[keyOf(k)] }, o, curPrefix)
+	}
+	return jsonString(Str(v), o.ensureAscii)
+}
+
+func jsonDumpDict(keys []Object, get func(Object) Object, o *jsonOptions, curPrefix string) string {
+	if len(keys) == 0 {
+		return "{}"
+	}
+	idx := make([]int, len(keys))
+	for i := range idx {
+		idx[i] = i
+	}
+	keyStrs := make([]string, len(keys))
+	for i, k := range keys {
+		keyStrs[i] = jsonKeyString(k)
+	}
+	if o.sortKeys {
+		sort.SliceStable(idx, func(a, b int) bool { return keyStrs[idx[a]] < keyStrs[idx[b]] })
+	}
+	parts := make([]string, len(keys))
+	for n, i := range idx {
+		parts[n] = jsonString(keyStrs[i], o.ensureAscii) + o.keySep +
+			jsonDump(get(keys[i]), o, curPrefix+o.indent)
+	}
+	return "{" + joinJSON(parts, o.itemSep, o.indent, curPrefix) + "}"
+}
+
+// joinJSON 处理 indent 模式下的容器内容（首项换行缩进 + 项间换行 + 收尾换行）
+func joinJSON(parts []string, itemSep, indent, curPrefix string) string {
+	if indent == "" {
+		return strings.Join(parts, itemSep)
+	}
+	child := curPrefix + indent
+	return "\n" + child + strings.Join(parts, itemSep+"\n"+child) + "\n" + curPrefix
+}
+
+// jsonKeyString 把字典键转换为 JSON 键字符串（整数键转字符串）
+func jsonKeyString(k Object) string {
+	switch x := k.(type) {
+	case string:
+		return x
+	case int:
+		return strconv.Itoa(x)
+	case bool:
+		if x {
+			return "true"
+		}
+		return "false"
+	case float64:
+		return formatFloat(x)
+	}
+	return Str(k)
+}
+
+// jsonString 编码 JSON 字符串（含转义与 ensure_ascii）
+func jsonString(s string, ensureAscii bool) string {
+	var sb strings.Builder
+	sb.WriteByte('"')
+	for _, r := range s {
+		switch r {
+		case '"':
+			sb.WriteString("\\\"")
+		case '\\':
+			sb.WriteString("\\\\")
+		case '\n':
+			sb.WriteString("\\n")
+		case '\r':
+			sb.WriteString("\\r")
+		case '\t':
+			sb.WriteString("\\t")
+		case '\b':
+			sb.WriteString("\\b")
+		case '\f':
+			sb.WriteString("\\f")
+		default:
+			if r < 0x20 {
+				sb.WriteString(fmt.Sprintf("\\u%04x", r))
+			} else if ensureAscii && r > 0x7f {
+				if r > 0xffff {
+					// 代理对
+					r2 := r - 0x10000
+					hi := 0xd800 + (r2 >> 10)
+					lo := 0xdc00 + (r2 & 0x3ff)
+					sb.WriteString(fmt.Sprintf("\\u%04x\\u%04x", hi, lo))
+				} else {
+					sb.WriteString(fmt.Sprintf("\\u%04x", r))
+				}
+			} else {
+				sb.WriteRune(r)
+			}
+		}
+	}
+	sb.WriteByte('"')
+	return sb.String()
+}
+
+// jsonParser JSON 文本解析器
+type jsonParser struct {
+	src string
+	pos int
+}
+
+func (p *jsonParser) skipWS() {
+	for p.pos < len(p.src) {
+		switch p.src[p.pos] {
+		case ' ', '\t', '\n', '\r':
+			p.pos++
+		default:
+			return
+		}
+	}
+}
+
+func (p *jsonParser) parseValue() (Object, error) {
+	if p.pos >= len(p.src) {
+		return nil, newExc("ValueError", "Unexpected end of JSON input")
+	}
+	switch c := p.src[p.pos]; {
+	case c == '{':
+		return p.parseObject()
+	case c == '[':
+		return p.parseArray()
+	case c == '"':
+		s, err := p.parseString()
+		if err != nil {
+			return nil, err
+		}
+		return s, nil
+	case c == 't':
+		if strings.HasPrefix(p.src[p.pos:], "true") {
+			p.pos += 4
+			return true, nil
+		}
+	case c == 'f':
+		if strings.HasPrefix(p.src[p.pos:], "false") {
+			p.pos += 5
+			return false, nil
+		}
+	case c == 'n':
+		if strings.HasPrefix(p.src[p.pos:], "null") {
+			p.pos += 4
+			return None, nil
+		}
+	case c == '-' || (c >= '0' && c <= '9'):
+		return p.parseNumber()
+	}
+	return nil, newExc("ValueError", "Invalid JSON value at position %d", p.pos)
+}
+
+func (p *jsonParser) parseObject() (Object, error) {
+	p.pos++ // '{'
+	out := NewDict()
+	p.skipWS()
+	if p.pos < len(p.src) && p.src[p.pos] == '}' {
+		p.pos++
+		return out, nil
+	}
+	for {
+		p.skipWS()
+		if p.pos >= len(p.src) || p.src[p.pos] != '"' {
+			return nil, newExc("ValueError", "Expecting property name at position %d", p.pos)
+		}
+		key, err := p.parseString()
+		if err != nil {
+			return nil, err
+		}
+		p.skipWS()
+		if p.pos >= len(p.src) || p.src[p.pos] != ':' {
+			return nil, newExc("ValueError", "Expecting ':' at position %d", p.pos)
+		}
+		p.pos++
+		p.skipWS()
+		v, err := p.parseValue()
+		if err != nil {
+			return nil, err
+		}
+		out.Set(key, v)
+		p.skipWS()
+		if p.pos >= len(p.src) {
+			return nil, newExc("ValueError", "Unexpected end of JSON input")
+		}
+		if p.src[p.pos] == ',' {
+			p.pos++
+			continue
+		}
+		if p.src[p.pos] == '}' {
+			p.pos++
+			return out, nil
+		}
+		return nil, newExc("ValueError", "Expecting ',' or '}' at position %d", p.pos)
+	}
+}
+
+func (p *jsonParser) parseArray() (Object, error) {
+	p.pos++ // '['
+	out := &List{}
+	p.skipWS()
+	if p.pos < len(p.src) && p.src[p.pos] == ']' {
+		p.pos++
+		return out, nil
+	}
+	for {
+		p.skipWS()
+		v, err := p.parseValue()
+		if err != nil {
+			return nil, err
+		}
+		out.Items = append(out.Items, v)
+		p.skipWS()
+		if p.pos >= len(p.src) {
+			return nil, newExc("ValueError", "Unexpected end of JSON input")
+		}
+		if p.src[p.pos] == ',' {
+			p.pos++
+			continue
+		}
+		if p.src[p.pos] == ']' {
+			p.pos++
+			return out, nil
+		}
+		return nil, newExc("ValueError", "Expecting ',' or ']' at position %d", p.pos)
+	}
+}
+
+func (p *jsonParser) parseString() (string, error) {
+	p.pos++ // '"'
+	var sb strings.Builder
+	for p.pos < len(p.src) {
+		c := p.src[p.pos]
+		switch {
+		case c == '"':
+			p.pos++
+			return sb.String(), nil
+		case c == '\\':
+			p.pos++
+			if p.pos >= len(p.src) {
+				return "", newExc("ValueError", "Unterminated string")
+			}
+			e := p.src[p.pos]
+			p.pos++
+			switch e {
+			case '"':
+				sb.WriteByte('"')
+			case '\\':
+				sb.WriteByte('\\')
+			case '/':
+				sb.WriteByte('/')
+			case 'b':
+				sb.WriteByte('\b')
+			case 'f':
+				sb.WriteByte('\f')
+			case 'n':
+				sb.WriteByte('\n')
+			case 'r':
+				sb.WriteByte('\r')
+			case 't':
+				sb.WriteByte('\t')
+			case 'u':
+				r, err := p.parseHex4()
+				if err != nil {
+					return "", err
+				}
+				if r >= 0xd800 && r <= 0xdbff && p.pos+1 < len(p.src) &&
+					p.src[p.pos] == '\\' && p.src[p.pos+1] == 'u' {
+					p.pos += 2
+					lo, err := p.parseHex4()
+					if err != nil {
+						return "", err
+					}
+					if lo >= 0xdc00 && lo <= 0xdfff {
+						sb.WriteRune(0x10000 + (r-0xd800)<<10 + (lo - 0xdc00))
+					} else {
+						sb.WriteRune(r)
+						sb.WriteRune(lo)
+					}
+				} else {
+					sb.WriteRune(r)
+				}
+			default:
+				return "", newExc("ValueError", "Invalid escape \\%c", e)
+			}
+		default:
+			sb.WriteByte(c)
+			p.pos++
+		}
+	}
+	return "", newExc("ValueError", "Unterminated string")
+}
+
+func (p *jsonParser) parseHex4() (rune, error) {
+	if p.pos+4 > len(p.src) {
+		return 0, newExc("ValueError", "Invalid \\u escape")
+	}
+	v, err := strconv.ParseUint(p.src[p.pos:p.pos+4], 16, 32)
+	if err != nil {
+		return 0, newExc("ValueError", "Invalid \\u escape")
+	}
+	p.pos += 4
+	return rune(v), nil
+}
+
+func (p *jsonParser) parseNumber() (Object, error) {
+	start := p.pos
+	isFloat := false
+	if p.pos < len(p.src) && p.src[p.pos] == '-' {
+		p.pos++
+	}
+	for p.pos < len(p.src) && isDigitByte(p.src[p.pos]) {
+		p.pos++
+	}
+	if p.pos < len(p.src) && p.src[p.pos] == '.' {
+		isFloat = true
+		p.pos++
+		for p.pos < len(p.src) && isDigitByte(p.src[p.pos]) {
+			p.pos++
+		}
+	}
+	if p.pos < len(p.src) && (p.src[p.pos] == 'e' || p.src[p.pos] == 'E') {
+		isFloat = true
+		p.pos++
+		if p.pos < len(p.src) && (p.src[p.pos] == '+' || p.src[p.pos] == '-') {
+			p.pos++
+		}
+		for p.pos < len(p.src) && isDigitByte(p.src[p.pos]) {
+			p.pos++
+		}
+	}
+	text := p.src[start:p.pos]
+	if text == "" || text == "-" {
+		return nil, newExc("ValueError", "Invalid number at position %d", start)
+	}
+	if !isFloat {
+		if n, err := strconv.Atoi(text); err == nil {
+			return n, nil
+		}
+	}
+	f, err := strconv.ParseFloat(text, 64)
+	if err != nil {
+		return nil, newExc("ValueError", "Invalid number '%s'", text)
+	}
+	return f, nil
+}
+
 // exceptionTypeNames 是支持的内建异常类型
 var exceptionTypeNames = []string{
 	"Exception", "BaseException", "ValueError", "TypeError", "IndexError",
@@ -3789,6 +4234,7 @@ func initGlobalEnv(argv []Object) *Environment {
 	env.Set("collections", newCollectionsModule())
 	env.Set("functools", newFunctoolsModule())
 	env.Set("itertools", newItertoolsModule())
+	env.Set("json", newJSONModule())
 	for _, name := range exceptionTypeNames {
 		env.Set(name, &PyType{Name: name})
 	}

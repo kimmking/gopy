@@ -37,7 +37,7 @@ go run . path/to/script.py
 ./test.sh
 ```
 
-当前状态：`tests/01.py` … `tests/24.py` 与 `example.py` **全部与 `python3` 输出完全一致**。
+当前状态：`tests/01.py` … `tests/25.py` 与 `example.py` **全部与 `python3` 输出完全一致**。
 
 ## 整体架构
 
@@ -164,7 +164,7 @@ or < and < not < 比较(含 in/is) < | < ^ < & < 移位 < +- < */ // % < 一元 
 
 **模块**
 
-- `import math` / `import os` / `import sys`，支持 `import x as y`、`from x.y import z`
+- `import math` / `import os` / `import sys` / `import collections` / `import functools` / `import itertools` / `import json`，支持 `import x as y`、`from x.y import z`、括号 `from x import (a, b)`
 
 **内置函数**
 
@@ -179,6 +179,8 @@ or < and < not < 比较(含 in/is) < | < ^ < & < 移位 < +- < */ // % < 一元 
 **`os`**：`getcwd listdir getpid getenv environ mkdir makedirs remove unlink rmdir rename chdir name sep`，以及 `os.path` 子模块：`join exists isfile isdir basename dirname abspath splitext split normpath realpath isabs relpath commonpath getsize`
 
 **`sys`**：`argv version platform exit`
+
+**`json`**：`dumps`（`indent` / `sort_keys` / `separators` / `ensure_ascii`、整数键转换）、`loads`（完整 JSON 解析：对象/数组/字符串转义含 `\uXXXX` 代理对/整数与浮点/字面量）
 
 **`functools`**：`reduce partial lru_cache`（带 `cache_info()`，可作装饰器或装饰器工厂）
 
@@ -216,6 +218,7 @@ or < and < not < 比较(含 in/is) < | < ^ < & < 移位 < +- < */ // % < 一元 
 | `tests/22.py` | functools：reduce/partial/lru_cache（含递归缓存与 cache_info）；itertools：count/cycle/repeat/chain/islice/accumulate/product/permutations/combinations/takewhile/dropwhile/starmap；括号 from-import |
 | `tests/23.py` | 自定义异常类继承链匹配、`e.args`、`raise from` 与 `__cause__`、except 元组、异常实例即对象（str/repr）、try/finally return 覆盖 |
 | `tests/24.py` | `str.maketrans/translate`、元组 startswith/endswith、填充字符、`dict.fromkeys`、dict/set 运算符、min/max default、`format`/`callable`、`sum(start=)` |
+| `tests/25.py` | json：dumps（indent/sort_keys/separators/ensure_ascii/转义/整数键）、loads（对象/数组/字符串/数字/字面量）、round trip |
 | `example.py` | 综合示例（脚本级冒烟测试） |
 
 ## 实现要点与已知取舍
@@ -225,7 +228,7 @@ or < and < not < 比较(含 in/is) < | < ^ < & < 移位 < +- < */ // % < 一元 
 - **UTF-8**：词法分析按字节扫描，多字节字符必须原样输出（`string([]byte{c})`），不能走 `string(c)` 的 code point 转换，否则中文会变成乱码。
 - **数字精度**：使用 Go `int` / `float64`，因此没有 Python 的任意精度整数；超大整数运算与 CPython 行为可能存在差异。
 - **`newExc` 格式化**：内部使用 `fmt.Sprintf`，错误信息中的字面量 `%` 必须写成 `%%`，否则会被误判为格式动词。
-- **尚未实现**：关键字-only 参数、模块文件导入（只能导入内置模块）。
+- **尚未实现**：关键字-only 参数、模块文件导入（只能导入内置模块）、`json.dump/load` 文件接口。
 
 ## 常见问题
 
