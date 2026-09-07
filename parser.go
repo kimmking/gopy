@@ -213,6 +213,14 @@ func (p *Parser) parseStatement() Stmt {
 		}
 		p.endSimple()
 		return st
+	case p.atKw("yield"):
+		p.advance()
+		st := &YieldStmt{}
+		if !p.atEnd() {
+			st.Value = p.parseExpr()
+		}
+		p.endSimple()
+		return st
 	case p.atKw("break"):
 		p.advance()
 		p.endSimple()
@@ -787,7 +795,14 @@ func (p *Parser) parseCallArgs() []CallArg {
 		} else if p.at(TkName) && p.peekAt(1).Type == TkOp && p.peekAt(1).Text == ":=" {
 			p.fail("不支持海象运算符")
 		} else {
-			args = append(args, CallArg{Value: p.parseConditional()})
+			v := p.parseConditional()
+			// 免括号生成器实参：sum(x for x in it)（只能是最后一个实参）
+			if p.atKw("for") {
+				clauses := p.parseCompClauses()
+				args = append(args, CallArg{Value: &GenExpr{Elem: v, Clauses: clauses}})
+				break
+			}
+			args = append(args, CallArg{Value: v})
 		}
 		if p.acceptOp(",") {
 			continue
@@ -864,7 +879,7 @@ func (p *Parser) parseAtom() Expr {
 		case "and", "or", "not", "in", "is", "if", "else", "elif", "while", "for",
 			"def", "class", "return", "break", "continue", "pass", "try", "except",
 			"finally", "import", "from", "as", "raise", "assert", "del", "global",
-			"with", "yield":
+			"with":
 			p.fail("此处不应出现关键字 '" + t.Text + "'")
 		}
 		p.advance()
@@ -882,6 +897,12 @@ func (p *Parser) parseAtom() Expr {
 				return &TupleLit{}
 			}
 			e := p.parseExpr()
+			// 生成器表达式：(x * x for x in it if c)
+			if p.atKw("for") {
+				clauses := p.parseCompClauses()
+				p.expectOp(")")
+				return &GenExpr{Elem: e, Clauses: clauses}
+			}
 			p.expectOp(")")
 			return e
 		}

@@ -1521,6 +1521,44 @@ var builtinFuncs = map[string]BuiltinFn{
 		os.Exit(code)
 		return None, nil
 	},
+	"next": func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, argCountErr("next", len(args), 1)
+		}
+		g, ok := args[0].(*Generator)
+		if !ok {
+			return nil, newExc("TypeError", "next() 的参数必须是生成器，实际为 '%s'", typeName(args[0]))
+		}
+		if activeInterp == nil {
+			return nil, newExc("RuntimeError", "解释器尚未初始化")
+		}
+		v, has, err := genNextRef(activeInterp, g)
+		if err != nil {
+			return nil, err
+		}
+		if !has {
+			if len(args) >= 2 {
+				return args[1], nil
+			}
+			return nil, newExc("StopIteration", "")
+		}
+		return v, nil
+	},
+	"iter": func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) != 1 {
+			return nil, argCountErr("iter", len(args), 1)
+		}
+		if g, ok := args[0].(*Generator); ok {
+			return g, nil
+		}
+		items, err := iterate(args[0])
+		if err != nil {
+			return nil, err
+		}
+		cp := make([]Object, len(items))
+		copy(cp, items)
+		return &Generator{Items: cp}, nil
+	},
 }
 
 func requireInt(name string, args []Object) (int, error) {

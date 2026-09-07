@@ -131,6 +131,32 @@ type Function struct {
 	Body     []Stmt
 	Env      *Environment
 	Defaults []Object
+	// IsGen 标记函数体包含 yield，调用时返回 Generator 而不立即执行
+	IsGen bool
+}
+
+// genEvent 是生成器在信道上传递的事件：让步值 / 结束 / 异常
+type genEvent struct {
+	val  Object
+	err  error
+	done bool
+}
+
+// Generator 惰性生成器：函数体在独立 goroutine 中执行，
+// yield 通过无缓冲信道与 next() 调用方同步（协程式交替执行）。
+// Fn 为 nil 时退化为对固定 Items 的迭代器（由内置 iter() 创建）。
+type Generator struct {
+	Fn      *Function
+	Args    []Object
+	Kwargs  map[string]Object
+	Items   []Object
+	pos     int
+	ch      chan genEvent
+	resume  chan bool
+	started bool
+	finished bool
+	localEnv *Environment
+	depth    int
 }
 
 type BuiltinFn func(args []Object, kwargs map[string]Object) (Object, error)
@@ -293,6 +319,8 @@ func typeName(v Object) string {
 		return "range"
 	case *Function:
 		return "function"
+	case *Generator:
+		return "generator"
 	case *Builtin:
 		return "builtin_function_or_method"
 	case *Method:
@@ -514,6 +542,8 @@ func Repr(v Object) string {
 		return fmt.Sprintf("range(%d, %d, %d)", x.Start, x.Stop, x.Step)
 	case *Function:
 		return "<function " + x.Name + " at " + fakeAddr("fn") + ">"
+	case *Generator:
+		return "<generator object " + x.Fn.Name + " at " + fakeAddr("gen") + ">"
 	case *Builtin:
 		return "<built-in function " + x.Name + ">"
 	case *Method:
@@ -1445,6 +1475,12 @@ func iterate(v Object) ([]Object, error) {
 			out = append(out, string(r))
 		}
 		return out, nil
+	case *Generator:
+		// 生成器惰性拉取至耗尽。通过钩子变量调用解释器，避免包级初始化循环
+		if generatorIterateHook == nil {
+			return nil, newExc("RuntimeError", "解释器尚未初始化")
+		}
+		return generatorIterateHook(x)
 	}
 	return nil, newExc("TypeError", "'%s' 对象不可迭代", typeName(v))
 }

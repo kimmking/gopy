@@ -23,10 +23,11 @@ type signal struct {
 }
 
 type Interpreter struct {
-	globals   *Environment
-	env       *Environment
-	callDepth int
-	reprDepth int
+	globals    *Environment
+	env        *Environment
+	callDepth  int
+	reprDepth  int
+	currentGen *Generator
 }
 
 // activeInterp 供内建函数（map / filter / sorted 的 key）回调用户函数
@@ -173,6 +174,7 @@ func (i *Interpreter) exec(s Stmt) (*signal, error) {
 			Body:     st.Body,
 			Env:      i.env,
 			Defaults: defaults,
+			IsGen:    containsYield(st.Body),
 		})
 		return nil, nil
 
@@ -185,6 +187,27 @@ func (i *Interpreter) exec(s Stmt) (*signal, error) {
 			return nil, err
 		}
 		return &signal{kind: sigReturn, val: v}, nil
+
+	case *YieldStmt:
+		// yield 在执行现场同步让步：发送值后阻塞等待下一次 next()，
+		// 恢复后继续执行同一语句块，因此 yield 信号不会向上传播。
+		g := i.currentGen
+		if g == nil {
+			return nil, newExc("SyntaxError", "'yield' outside function")
+		}
+		var val Object = None
+		if st.Value != nil {
+			v, err := i.eval(st.Value)
+			if err != nil {
+				return nil, err
+			}
+			val = v
+		}
+		g.ch <- genEvent{val: val}
+		<-g.resume
+		i.env = g.localEnv
+		i.callDepth = g.depth + 1
+		return nil, nil
 
 	case *BreakStmt:
 		return &signal{kind: sigBreak}, nil
@@ -582,6 +605,7 @@ func (i *Interpreter) execClassDef(st *ClassDef) error {
 				Body:     fd.Body,
 				Env:      classEnv,
 				Defaults: defaults,
+				IsGen:    containsYield(fd.Body),
 			}
 			continue
 		}
@@ -909,6 +933,15 @@ func (i *Interpreter) eval(e Expr) (Object, error) {
 	case *ListComp:
 		return i.evalListComp(x)
 
+	case *GenExpr:
+		// 生成器表达式编译为一个无参生成器函数，惰性求值
+		return &Generator{Fn: &Function{
+			Name:  "<genexpr>",
+			Body:  genExprBody(x.Elem, x.Clauses),
+			Env:   i.env,
+			IsGen: true,
+		}}, nil
+
 	case *DictComp:
 		return i.evalDictComp(x)
 
@@ -1117,6 +1150,22 @@ func (i *Interpreter) runComp(clauses []CompClause, depth int, emit func() error
 		}
 	}
 	return nil
+}
+
+// genExprBody 把生成器表达式的 for/if 子句展开为嵌套的 for/if 语句，
+// 最内层对元素表达式执行 yield
+func genExprBody(el Expr, clauses []CompClause) []Stmt {
+	c := clauses[0]
+	var inner []Stmt
+	if len(clauses) > 1 {
+		inner = genExprBody(el, clauses[1:])
+	} else {
+		inner = []Stmt{&YieldStmt{Value: el}}
+	}
+	for k := len(c.Ifs) - 1; k >= 0; k-- {
+		inner = []Stmt{&IfStmt{Cond: c.Ifs[k], Body: inner}}
+	}
+	return []Stmt{&ForStmt{Targets: c.Targets, Iter: c.Iter, Body: inner}}
 }
 
 // ---------- 下标与切片 ----------
@@ -1392,10 +1441,34 @@ func (i *Interpreter) callObject(fn Object, args []Object, kwargs map[string]Obj
 }
 
 func (i *Interpreter) callFunction(fn *Function, args []Object, kwargs map[string]Object) (Object, error) {
+	if fn.IsGen {
+		// 生成器调用只创建生成器对象，函数体在首次 next() 时才执行
+		return &Generator{Fn: fn, Args: args, Kwargs: kwargs}, nil
+	}
 	if i.callDepth >= 200 {
 		return nil, newExc("RecursionError", "超过最大递归深度")
 	}
 	local := NewEnvironment(fn.Env)
+	if err := i.bindParams(fn, local, args, kwargs); err != nil {
+		return nil, err
+	}
+	saved := i.env
+	i.env = local
+	i.callDepth++
+	sig, err := i.execBlock(fn.Body)
+	i.callDepth--
+	i.env = saved
+	if err != nil {
+		return nil, err
+	}
+	if sig != nil && sig.kind == sigReturn {
+		return sig.val, nil
+	}
+	return None, nil
+}
+
+// bindParams 把实参绑定到函数的局部作用域（位置/关键字/默认值/*args/**kwargs）
+func (i *Interpreter) bindParams(fn *Function, local *Environment, args []Object, kwargs map[string]Object) error {
 	pi := 0
 	for idx, p := range fn.Params {
 		if p.Star || p.Star2 {
@@ -1403,7 +1476,7 @@ func (i *Interpreter) callFunction(fn *Function, args []Object, kwargs map[strin
 		}
 		if pi < len(args) {
 			if _, ok := kwargs[p.Name]; ok {
-				return nil, newExc("TypeError", "%s() 的参数 '%s' 同时收到了位置值与关键字值", fn.Name, p.Name)
+				return newExc("TypeError", "%s() 的参数 '%s' 同时收到了位置值与关键字值", fn.Name, p.Name)
 			}
 			local.Set(p.Name, args[pi])
 			pi++
@@ -1418,7 +1491,7 @@ func (i *Interpreter) callFunction(fn *Function, args []Object, kwargs map[strin
 			local.Set(p.Name, fn.Defaults[idx])
 			continue
 		}
-		return nil, newExc("TypeError", "%s() 缺少必要的位置参数: '%s'", fn.Name, p.Name)
+		return newExc("TypeError", "%s() 缺少必要的位置参数: '%s'", fn.Name, p.Name)
 	}
 	hasStar := false
 	for _, p := range fn.Params {
@@ -1438,19 +1511,144 @@ func (i *Interpreter) callFunction(fn *Function, args []Object, kwargs map[strin
 		}
 	}
 	if pi < len(args) && !hasStar {
-		return nil, newExc("TypeError", "%s() 只接受 %d 个位置参数，但传入了 %d 个", fn.Name, pi, len(args))
+		return newExc("TypeError", "%s() 只接受 %d 个位置参数，但传入了 %d 个", fn.Name, pi, len(args))
 	}
-	saved := i.env
+	return nil
+}
+
+// ---------- 生成器协程驱动 ----------
+
+// generatorIterateHook 供 objects.go 的 iterate 物化生成器，打破包级初始化循环
+var generatorIterateHook func(g *Generator) ([]Object, error)
+
+func init() {
+	generatorIterateHook = func(g *Generator) ([]Object, error) {
+		var out []Object
+		for {
+			v, ok, err := activeInterp.genNext(g)
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				return out, nil
+			}
+			out = append(out, v)
+		}
+	}
+}
+
+// genNext 拉取生成器的下一个值；耗尽时 ok 为 false。
+// 调用方与生成器 goroutine 通过无缓冲信道交替执行，解释器状态
+// （i.env / i.callDepth）在每次交接时恢复为调用方的现场。
+// genNextRef 供内置 next() 间接调用 genNext，避免 builtinFuncs 的初始化循环
+var genNextRef func(i *Interpreter, g *Generator) (Object, bool, error)
+
+func init() {
+	genNextRef = (*Interpreter).genNext
+}
+
+func (i *Interpreter) genNext(g *Generator) (Object, bool, error) {
+	if g.finished {
+		// 耗尽：ok 为 false 且不报错（list()/for 遍历得到空；
+		// 内置 next() 负责把 !ok 转换为 StopIteration）
+		return nil, false, nil
+	}
+	// 列表迭代器模式（iter() 内建函数创建）
+	if g.Fn == nil {
+		if g.pos < len(g.Items) {
+			v := g.Items[g.pos]
+			g.pos++
+			return v, true, nil
+		}
+		g.finished = true
+		return nil, false, nil
+	}
+	callerEnv := i.env
+	callerDepth := i.callDepth
+	if !g.started {
+		g.started = true
+		g.ch = make(chan genEvent)
+		g.resume = make(chan bool)
+		go func() {
+			ev := i.runGenBody(g)
+			g.ch <- ev
+		}()
+	} else {
+		g.resume <- true
+	}
+	ev := <-g.ch
+	i.env = callerEnv
+	i.callDepth = callerDepth
+	if ev.err != nil {
+		g.finished = true
+		return nil, false, ev.err
+	}
+	if ev.done {
+		g.finished = true
+		return nil, false, nil
+	}
+	return ev.val, true, nil
+}
+
+// runGenBody 在生成器 goroutine 中执行函数体（在首次 next() 时开始）。
+// yield 事件由 YieldStmt 在执行现场直接发送；本函数返回最终事件（结束或异常）。
+func (i *Interpreter) runGenBody(g *Generator) genEvent {
+	savedGen := i.currentGen
+	i.currentGen = g
+	local := NewEnvironment(g.Fn.Env)
+	if err := i.bindParams(g.Fn, local, g.Args, g.Kwargs); err != nil {
+		i.currentGen = savedGen
+		return genEvent{err: err}
+	}
+	g.localEnv = local
+	g.depth = i.callDepth
 	i.env = local
 	i.callDepth++
-	sig, err := i.execBlock(fn.Body)
+	_, err := i.execBlock(g.Fn.Body)
 	i.callDepth--
-	i.env = saved
+	i.currentGen = savedGen
 	if err != nil {
-		return nil, err
+		if pe, ok := err.(*PyException); ok {
+			return genEvent{err: pe}
+		}
+		return genEvent{err: err}
 	}
-	if sig != nil && sig.kind == sigReturn {
-		return sig.val, nil
+	return genEvent{done: true}
+}
+
+// containsYield 判断语句块中是否直接包含 yield（不进入嵌套的 def/class/装饰器）
+func containsYield(stmts []Stmt) bool {
+	for _, s := range stmts {
+		switch t := s.(type) {
+		case *YieldStmt:
+			return true
+		case *IfStmt:
+			if containsYield(t.Body) || containsYield(t.Else) {
+				return true
+			}
+			for _, el := range t.Elifs {
+				if containsYield(el.Body) {
+					return true
+				}
+			}
+		case *WhileStmt:
+			if containsYield(t.Body) || containsYield(t.Else) {
+				return true
+			}
+		case *ForStmt:
+			if containsYield(t.Body) || containsYield(t.Else) {
+				return true
+			}
+		case *TryStmt:
+			if containsYield(t.Body) || containsYield(t.Else) || containsYield(t.Finally) {
+				return true
+			}
+			for _, h := range t.Handlers {
+				if containsYield(h.Body) {
+					return true
+				}
+			}
+		}
 	}
-	return None, nil
+	return false
 }

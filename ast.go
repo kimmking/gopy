@@ -75,6 +75,9 @@ type FuncDef struct {
 // ReturnStmt 返回语句，Value 为 nil 表示裸 return
 type ReturnStmt struct{ Value Expr }
 
+// YieldStmt 生成器让步语句
+type YieldStmt struct{ Value Expr }
+
 type BreakStmt struct{}
 
 type ContinueStmt struct{}
@@ -162,6 +165,7 @@ func (*WhileStmt) stmt()      {}
 func (*ForStmt) stmt()        {}
 func (*FuncDef) stmt()        {}
 func (*ReturnStmt) stmt()     {}
+func (*YieldStmt) stmt()      {}
 func (*BreakStmt) stmt()      {}
 func (*ContinueStmt) stmt()   {}
 func (*PassStmt) stmt()       {}
@@ -220,6 +224,12 @@ type CompClause struct {
 }
 
 type ListComp struct {
+	Elem    Expr
+	Clauses []CompClause
+}
+
+// GenExpr 生成器表达式 (x for x in it if c)
+type GenExpr struct {
 	Elem    Expr
 	Clauses []CompClause
 }
@@ -313,6 +323,7 @@ func (*TupleLit) expr()  {}
 func (*DictLit) expr()   {}
 func (*ListComp) expr()  {}
 func (*DictComp) expr()  {}
+func (*GenExpr) expr()   {}
 func (*BinOp) expr()     {}
 func (*UnaryOp) expr()   {}
 func (*BoolOp) expr()    {}

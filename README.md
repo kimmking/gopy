@@ -37,7 +37,7 @@ go run . path/to/script.py
 ./test.sh
 ```
 
-当前状态：`tests/01.py` … `tests/16.py` 与 `example.py` **全部与 `python3` 输出完全一致**。
+当前状态：`tests/01.py` … `tests/17.py` 与 `example.py` **全部与 `python3` 输出完全一致**。
 
 ## 整体架构
 
@@ -109,7 +109,13 @@ or < and < not < 比较(含 in/is) < | < ^ < & < 移位 < +- < */ // % < 一元 
 
 - `if` / `elif` / `else`、`while ... else`、`for ... in ... else`
 - `break` / `continue` / `pass`
-- 遍历目标：list / tuple / str / dict（键）/ set / range
+- 遍历目标：list / tuple / str / dict（键）/ set / range / 生成器
+
+**生成器**
+
+- `yield` 语句：生成器函数惰性求值（协程式实现，函数体在独立 goroutine 中运行，通过无缓冲信道与调用方交替执行）
+- 生成器表达式 `(x*x for x in it if c)`，含免括号调用实参形式 `sum(x for x in it)`
+- `next(g)` / `next(g, default)` / `iter(g)`；`list` / `tuple` / `sum` / `for` 等直接消费生成器；耗尽后再次迭代为空
 
 **函数**
 
@@ -153,7 +159,7 @@ or < and < not < 比较(含 in/is) < | < ^ < & < 移位 < +- < */ // % < 一元 
 
 **内置函数**
 
-`print len str repr type int float bool list tuple dict set range abs round pow divmod min max sum sorted reversed enumerate zip map filter any all chr ord hex oct bin isinstance hasattr getattr setattr id input exit long`
+`print len str repr type int float bool list tuple dict set range abs round pow divmod min max sum sorted reversed enumerate zip map filter any all chr ord hex oct bin isinstance hasattr getattr setattr id input exit long next iter`
 
 > `long` 为兼容 Python 2 的长整型转换，在本解释器中与 `int` 等价（支持 `base`）。
 
@@ -187,6 +193,7 @@ or < and < not < 比较(含 in/is) < | < ^ < & < 移位 < +- < */ // % < 一元 
 | `tests/14.py` | 类型转换与数值操作：`int/long/float/str/repr/tuple/list/chr/ord/hex/oct/bin`（含 `base` 进制、字符串参数、布尔转换） |
 | `tests/15.py` | 字符串增强与格式化：printf 风格 `%s %d %x %f`（宽度/精度/对齐/符号/`#`/字典映射）、新增方法 `partition/rpartition/istitle/isnumeric/isdecimal/casefold/removeprefix/removesuffix/expandtabs`、`str.format` 自动编号/位置/关键字/格式说明符 |
 | `tests/16.py` | `nonlocal` 闭包计数、调用处 `*args/**kwargs` 展开、装饰器（堆叠/带参/透传/记录调用）、函数 `__name__` |
+| `tests/17.py` | 生成器：`yield`、`next()`/默认值/StopIteration、惰性求值、生成器表达式（含免括号实参）、生成器管道、耗尽后再迭代 |
 | `example.py` | 综合示例（脚本级冒烟测试） |
 
 ## 实现要点与已知取舍
@@ -196,7 +203,7 @@ or < and < not < 比较(含 in/is) < | < ^ < & < 移位 < +- < */ // % < 一元 
 - **UTF-8**：词法分析按字节扫描，多字节字符必须原样输出（`string([]byte{c})`），不能走 `string(c)` 的 code point 转换，否则中文会变成乱码。
 - **数字精度**：使用 Go `int` / `float64`，因此没有 Python 的任意精度整数；超大整数运算与 CPython 行为可能存在差异。
 - **`newExc` 格式化**：内部使用 `fmt.Sprintf`，错误信息中的字面量 `%` 必须写成 `%%`，否则会被误判为格式动词。
-- **尚未实现**：`with` 语句、生成器与 `yield`、多继承、关键字-only 参数、模块文件导入（只能导入内置模块）。
+- **尚未实现**：`with` 语句、多继承、关键字-only 参数、模块文件导入（只能导入内置模块）。
 
 ## 常见问题
 
