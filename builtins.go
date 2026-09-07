@@ -1462,6 +1462,40 @@ var builtinFuncs = map[string]BuiltinFn{
 		}
 		return isInstanceOf(args[0], args[1]), nil
 	},
+	"issubclass": func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) != 2 {
+			return nil, argCountErr("issubclass", len(args), 2)
+		}
+		return isSubclassOf(args[0], args[1]), nil
+	},
+	"super": func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) >= 2 {
+			cls, ok := args[0].(*Class)
+			if !ok {
+				return nil, newExc("TypeError", "super() 的第一个参数必须是类")
+			}
+			return &Super{Cls: cls, Obj: args[1]}, nil
+		}
+		if activeInterp == nil || len(activeInterp.frames) == 0 {
+			return nil, newExc("TypeError", "super() 需要在类方法中调用")
+		}
+		fr := activeInterp.frames[len(activeInterp.frames)-1]
+		if fr.fn.DefClass == nil {
+			return nil, newExc("TypeError", "super(): 当前函数不属于任何类")
+		}
+		// 取第一个非 star 参数作为 self / cls
+		for _, p := range fr.fn.Params {
+			if p.Star || p.Star2 {
+				continue
+			}
+			v, ok := fr.local.vars[p.Name]
+			if !ok {
+				return nil, newExc("RuntimeError", "super(): 无法获取 self")
+			}
+			return &Super{Cls: fr.fn.DefClass, Obj: v}, nil
+		}
+		return nil, newExc("TypeError", "super(): 当前函数没有 self 参数")
+	},
 	"hasattr": func(args []Object, kwargs map[string]Object) (Object, error) {
 		if len(args) != 2 {
 			return nil, argCountErr("hasattr", len(args), 2)
@@ -1781,7 +1815,7 @@ func isInstanceOf(obj Object, cls Object) bool {
 		if !ok {
 			return false
 		}
-		for cur := inst.Class; cur != nil; cur = cur.Parent {
+		for _, cur := range inst.Class.MRO {
 			if cur == c {
 				return true
 			}
@@ -1792,6 +1826,37 @@ func isInstanceOf(obj Object, cls Object) bool {
 	case *Tuple:
 		for _, it := range c.Items {
 			if isInstanceOf(obj, it) {
+				return true
+			}
+		}
+		return false
+	}
+	return false
+}
+
+// isSubclassOf 判断 sub 是否为 parent 的子类（沿 MRO）
+func isSubclassOf(sub, parent Object) bool {
+	switch p := parent.(type) {
+	case *Class:
+		s, ok := sub.(*Class)
+		if !ok {
+			return false
+		}
+		for _, cur := range s.MRO {
+			if cur == p {
+				return true
+			}
+		}
+		return false
+	case *PyType:
+		s, ok := sub.(*PyType)
+		if !ok {
+			return false
+		}
+		return s.Name == p.Name
+	case *Tuple:
+		for _, it := range p.Items {
+			if isSubclassOf(sub, it) {
 				return true
 			}
 		}

@@ -37,7 +37,7 @@ go run . path/to/script.py
 ./test.sh
 ```
 
-当前状态：`tests/01.py` … `tests/19.py` 与 `example.py` **全部与 `python3` 输出完全一致**。
+当前状态：`tests/01.py` … `tests/20.py` 与 `example.py` **全部与 `python3` 输出完全一致**。
 
 ## 整体架构
 
@@ -140,7 +140,7 @@ or < and < not < 比较(含 in/is) < | < ^ < & < 移位 < +- < */ // % < 一元 
 **类与对象**
 
 - `class` 定义、`__init__` 构造、`self` 自动绑定
-- 单继承（方法沿父链查找）、`isinstance`、类属性（含类属性赋值 `Cls.attr = v`）
+- 多继承与 C3 方法解析顺序（MRO）、零参 `super()`（菱形继承协作式 `__init__` 正确）、`isinstance` / `issubclass`、类属性（含类属性赋值 `Cls.attr = v`）
 - 运算符重载：`__add__ __sub__ __mul__ __truediv__ __floordiv__ __mod__ __pow__` 及其反射形式 `__r*__`、`__eq__ __ne__ __lt__ __le__ __gt__ __ge__`、`__len__ __getitem__ __setitem__ __contains__ __call__ __bool__`
 - `__repr__` / `__str__` 分工与 CPython 一致：`repr()` 用 `__repr__`，`str()` 优先 `__str__` 回退 `__repr__`
 - `@property` / `@staticmethod` / `@classmethod` 描述符（classmethod 绑定动态类）
@@ -200,6 +200,7 @@ or < and < not < 比较(含 in/is) < | < ^ < & < 移位 < +- < */ // % < 一元 
 | `tests/17.py` | 生成器：`yield`、`next()`/默认值/StopIteration、惰性求值、生成器表达式（含免括号实参）、生成器管道、耗尽后再迭代 |
 | `tests/18.py` | `with` 语句：进入/退出顺序、异常传播与抑制（`__exit__` 返回 True）、嵌套与多上下文项、资源类、`return`/`break` 穿过 with、`exc_type.__name__` |
 | `tests/19.py` | 运算符重载（算术/反射/比较/`len`/下标/`in`/`__call__`/`__bool__`）、`__repr__`/`__str__` 分工、`@property`/`@staticmethod`/`@classmethod`、类属性赋值 |
+| `tests/20.py` | 多继承 C3 MRO、零参 `super()`（方法链/菱形协作 `__init__`/类方法中）、`isinstance`/`issubclass`、Mixin |
 | `example.py` | 综合示例（脚本级冒烟测试） |
 
 ## 实现要点与已知取舍
@@ -209,7 +210,7 @@ or < and < not < 比较(含 in/is) < | < ^ < & < 移位 < +- < */ // % < 一元 
 - **UTF-8**：词法分析按字节扫描，多字节字符必须原样输出（`string([]byte{c})`），不能走 `string(c)` 的 code point 转换，否则中文会变成乱码。
 - **数字精度**：使用 Go `int` / `float64`，因此没有 Python 的任意精度整数；超大整数运算与 CPython 行为可能存在差异。
 - **`newExc` 格式化**：内部使用 `fmt.Sprintf`，错误信息中的字面量 `%` 必须写成 `%%`，否则会被误判为格式动词。
-- **尚未实现**：多继承、关键字-only 参数、模块文件导入（只能导入内置模块）。
+- **尚未实现**：关键字-only 参数、模块文件导入（只能导入内置模块）。
 
 ## 常见问题
 

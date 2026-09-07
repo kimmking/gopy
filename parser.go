@@ -416,9 +416,9 @@ func (p *Parser) parseClassDef() Stmt {
 	st := &ClassDef{Name: p.expectName()}
 	if p.acceptOp("(") {
 		if !p.atOp(")") {
-			st.Bases = append(st.Bases, p.parseExpr())
+			st.Bases = append(st.Bases, p.parseConditional())
 			for p.acceptOp(",") {
-				st.Bases = append(st.Bases, p.parseExpr())
+				st.Bases = append(st.Bases, p.parseConditional())
 			}
 		}
 		p.expectOp(")")

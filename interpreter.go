@@ -28,6 +28,27 @@ type Interpreter struct {
 	callDepth  int
 	reprDepth  int
 	currentGen *Generator
+	// frames 记录当前调用栈（供零参 super() 获取当前类与 self/cls）
+	frames []*callFrame
+}
+
+type callFrame struct {
+	fn    *Function
+	local *Environment
+}
+
+// setDefClass 递归设置包装对象内部函数的定义类
+func setDefClass(v Object, cls *Class) {
+	switch w := v.(type) {
+	case *Function:
+		w.DefClass = cls
+	case *StaticMethod:
+		w.Fn.DefClass = cls
+	case *ClassMethod:
+		w.Fn.DefClass = cls
+	case *Property:
+		w.Getter.DefClass = cls
+	}
 }
 
 // activeInterp 供内建函数（map / filter / sorted 的 key）回调用户函数
@@ -665,21 +686,27 @@ func (i *Interpreter) execDelete(st *DeleteStmt) error {
 
 func (i *Interpreter) execClassDef(st *ClassDef) error {
 	cls := &Class{Name: st.Name, Methods: map[string]*Function{}, Attrs: map[string]Object{}}
-	if len(st.Bases) > 0 {
-		base, err := i.eval(st.Bases[0])
+	var bases []*Class
+	for _, be := range st.Bases {
+		bv, err := i.eval(be)
 		if err != nil {
 			return err
 		}
-		bcls, ok := base.(*Class)
+		bcls, ok := bv.(*Class)
 		if !ok {
-			return newExc("TypeError", "基类必须是类，实际为 '%s'", typeName(base))
+			return newExc("TypeError", "基类必须是类，实际为 '%s'", typeName(bv))
 		}
-		cls.Parent = bcls
+		bases = append(bases, bcls)
 	}
+	cls.Bases = bases
+	mro, err := computeMRO(cls, bases)
+	if err != nil {
+		return err
+	}
+	cls.MRO = mro
 	classEnv := NewEnvironment(i.env)
 	saved := i.env
 	i.env = classEnv
-	var err error
 	for _, bs := range st.Body {
 		if fd, ok := bs.(*FuncDef); ok {
 			var defaults []Object
@@ -687,7 +714,7 @@ func (i *Interpreter) execClassDef(st *ClassDef) error {
 			if err != nil {
 				break
 			}
-			cls.Methods[fd.Name] = &Function{
+			fn := &Function{
 				Name:     fd.Name,
 				Params:   fd.Params,
 				Body:     fd.Body,
@@ -695,6 +722,8 @@ func (i *Interpreter) execClassDef(st *ClassDef) error {
 				Defaults: defaults,
 				IsGen:    containsYield(fd.Body),
 			}
+			fn.DefClass = cls
+			cls.Methods[fd.Name] = fn
 			continue
 		}
 		if ds, ok := bs.(*DecoratedStmt); ok {
@@ -705,10 +734,13 @@ func (i *Interpreter) execClassDef(st *ClassDef) error {
 			name := ds.decoratedName()
 			if v, ok := classEnv.vars[name]; ok {
 				if fn, isFn := v.(*Function); isFn {
+					setDefClass(v, cls)
 					cls.Methods[name] = fn
 					// 函数从 classEnv 移除；其余（property/static/classmethod 等
 					// 包装对象）保留，随后统一成为类属性
 					delete(classEnv.vars, name)
+				} else {
+					setDefClass(v, cls)
 				}
 			}
 			continue
@@ -1488,9 +1520,12 @@ func unwrapClassAttr(owner *Class, recv Object, v Object) (Object, bool) {
 	case *StaticMethod:
 		return w.Fn, true
 	case *ClassMethod:
-		// 通过实例访问时绑定其实际类型（动态类），通过类访问时绑定该类
-		if inst, ok := recv.(*Instance); ok {
-			return &Method{Recv: inst.Class, Fn: w.Fn}, true
+		// 绑定动态类：实例访问绑定其实际类型；类访问绑定访问处的类
+		switch r := recv.(type) {
+		case *Instance:
+			return &Method{Recv: r.Class, Fn: w.Fn}, true
+		case *Class:
+			return &Method{Recv: r, Fn: w.Fn}, true
 		}
 		return &Method{Recv: owner, Fn: w.Fn}, true
 	}
@@ -1503,7 +1538,7 @@ func getAttr(obj Object, name string) (Object, error) {
 		if v, ok := x.Fields[name]; ok {
 			return v, nil
 		}
-		for cur := x.Class; cur != nil; cur = cur.Parent {
+		for _, cur := range x.Class.MRO {
 			if fn, ok := cur.Methods[name]; ok {
 				return &Method{Recv: obj, Fn: fn}, nil
 			}
@@ -1521,12 +1556,15 @@ func getAttr(obj Object, name string) (Object, error) {
 		}
 		return nil, newExc("AttributeError", "module '%s' 没有属性 '%s'", x.Name, name)
 	case *Class:
-		for cur := x; cur != nil; cur = cur.Parent {
+		if name == "__name__" || name == "name" {
+			return x.Name, nil
+		}
+		for _, cur := range x.MRO {
 			if fn, ok := cur.Methods[name]; ok {
 				return fn, nil
 			}
 			if v, ok := cur.Attrs[name]; ok {
-				if r, ok2 := unwrapClassAttr(cur, nil, v); ok2 {
+				if r, ok2 := unwrapClassAttr(cur, x, v); ok2 {
 					return r, nil
 				}
 				return nil, newExc("AttributeError", "属性 '%s' 访问失败", name)
@@ -1543,6 +1581,11 @@ func getAttr(obj Object, name string) (Object, error) {
 			return x.Name, nil
 		}
 		return nil, newExc("AttributeError", "type 对象没有属性 '%s'", name)
+	case *Super:
+		if v, ok := x.lookup(name); ok {
+			return v, nil
+		}
+		return nil, newExc("AttributeError", "'super' 对象没有属性 '%s'", name)
 	case *PyException:
 		switch name {
 		case "args":
@@ -1671,7 +1714,9 @@ func (i *Interpreter) callFunction(fn *Function, args []Object, kwargs map[strin
 	saved := i.env
 	i.env = local
 	i.callDepth++
+	i.frames = append(i.frames, &callFrame{fn: fn, local: local})
 	sig, err := i.execBlock(fn.Body)
+	i.frames = i.frames[:len(i.frames)-1]
 	i.callDepth--
 	i.env = saved
 	if err != nil {
@@ -1820,7 +1865,9 @@ func (i *Interpreter) runGenBody(g *Generator) genEvent {
 	g.depth = i.callDepth
 	i.env = local
 	i.callDepth++
+	i.frames = append(i.frames, &callFrame{fn: g.Fn, local: local})
 	_, err := i.execBlock(g.Fn.Body)
+	i.frames = i.frames[:len(i.frames)-1]
 	i.callDepth--
 	i.currentGen = savedGen
 	if err != nil {

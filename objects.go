@@ -133,6 +133,8 @@ type Function struct {
 	Defaults []Object
 	// IsGen 标记函数体包含 yield，调用时返回 Generator 而不立即执行
 	IsGen bool
+	// DefClass 记录方法定义所在的类（供零参 super() 使用）
+	DefClass *Class
 }
 
 // genEvent 是生成器在信道上传递的事件：让步值 / 结束 / 异常
@@ -187,16 +189,18 @@ type BuiltinMethod struct {
 	Name string
 }
 
-// Class 类对象，Parent 支持单继承
+// Class 类对象，Bases 支持多继承，MRO 为 C3 线性化结果
 type Class struct {
 	Name    string
-	Parent  *Class
+	Bases   []*Class
+	MRO     []*Class
 	Methods map[string]*Function
 	Attrs   map[string]Object
 }
 
+// LookupMethod 沿 MRO 查找方法
 func (c *Class) LookupMethod(name string) (*Function, bool) {
-	for cur := c; cur != nil; cur = cur.Parent {
+	for _, cur := range c.MRO {
 		if fn, ok := cur.Methods[name]; ok {
 			return fn, true
 		}
@@ -204,10 +208,114 @@ func (c *Class) LookupMethod(name string) (*Function, bool) {
 	return nil, false
 }
 
+// LookupAttr 沿 MRO 查找类属性
 func (c *Class) LookupAttr(name string) (Object, bool) {
-	for cur := c; cur != nil; cur = cur.Parent {
+	for _, cur := range c.MRO {
 		if v, ok := cur.Attrs[name]; ok {
 			return v, true
+		}
+	}
+	return nil, false
+}
+
+// computeMRO 计算 C3 线性化：L(C) = C + merge(L(B1), ..., [B1, B2, ...])
+func computeMRO(cls *Class, bases []*Class) ([]*Class, error) {
+	if len(bases) == 1 {
+		return append([]*Class{cls}, bases[0].MRO...), nil
+	}
+	if len(bases) == 0 {
+		return []*Class{cls}, nil
+	}
+	seqs := make([][]*Class, 0, len(bases)+2)
+	for _, b := range bases {
+		seqs = append(seqs, b.MRO)
+	}
+	headSeq := make([]*Class, len(bases))
+	copy(headSeq, bases)
+	seqs = append(seqs, headSeq, []*Class{cls})
+	out := []*Class{cls}
+	for {
+		anyLeft := false
+		for _, s := range seqs {
+			if len(s) > 0 {
+				anyLeft = true
+				break
+			}
+		}
+		if !anyLeft {
+			return out, nil
+		}
+		// 找一个不出现在任何序列尾部的头部候选
+		var cand *Class
+		for _, s := range seqs {
+			if len(s) == 0 {
+				continue
+			}
+			c := s[0]
+			inTail := false
+			for _, s2 := range seqs {
+				for k := 1; k < len(s2); k++ {
+					if s2[k] == c {
+						inTail = true
+						break
+					}
+				}
+				if inTail {
+					break
+				}
+			}
+			if !inTail {
+				cand = c
+				break
+			}
+		}
+		if cand == nil {
+			return nil, newExc("TypeError", "Cannot create a consistent method resolution order (MRO) for bases %s", cls.Name)
+		}
+		out = append(out, cand)
+		for k, s := range seqs {
+			if len(s) > 0 && s[0] == cand {
+				rest := make([]*Class, len(s)-1)
+				copy(rest, s[1:])
+				seqs[k] = rest
+			}
+		}
+	}
+}
+
+// Super 零参 super() 的返回值：沿 Obj 实际类型的 MRO 中 Cls 之后的基类查找
+type Super struct {
+	Cls *Class
+	Obj Object
+}
+
+// superLookup 在 Obj 类型的 MRO 中从 Cls 之后开始查找
+func (s *Super) lookup(name string) (Object, bool) {
+	var mro []*Class
+	switch o := s.Obj.(type) {
+	case *Instance:
+		mro = o.Class.MRO
+	case *Class:
+		mro = o.MRO
+	default:
+		return nil, false
+	}
+	start := 1
+	for k, c := range mro {
+		if c == s.Cls {
+			start = k + 1
+			break
+		}
+	}
+	for k := start; k < len(mro); k++ {
+		cur := mro[k]
+		if fn, ok := cur.Methods[name]; ok {
+			return &Method{Recv: s.Obj, Fn: fn}, true
+		}
+		if v, ok := cur.Attrs[name]; ok {
+			if r, ok2 := unwrapClassAttr(cur, s.Obj, v); ok2 {
+				return r, true
+			}
 		}
 	}
 	return nil, false
@@ -342,6 +450,8 @@ func typeName(v Object) string {
 		return "function"
 	case *ClassMethod:
 		return "bound method"
+	case *Super:
+		return "super"
 	case *Class:
 		return "type"
 	case *PyType:
