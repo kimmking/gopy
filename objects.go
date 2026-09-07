@@ -1060,6 +1060,30 @@ func binaryOp(op string, l, r Object) (Object, error) {
 			return v, err
 		}
 	}
+	// 集合运算符 | & - ^
+	if ls, ok := l.(*Set); ok {
+		if rs, ok2 := r.(*Set); ok2 {
+			switch op {
+			case "|", "&", "-", "^":
+				return setBinOp(op, ls, rs)
+			}
+		}
+	}
+	// 字典合并（Python 3.9+）
+	if op == "|" {
+		if ld, ok := l.(*Dict); ok {
+			if rd, ok2 := r.(*Dict); ok2 {
+				out := NewDict()
+				for _, k := range ld.Keys {
+					out.Set(k, ld.Vals[keyOf(k)])
+				}
+				for _, k := range rd.Keys {
+					out.Set(k, rd.Vals[keyOf(k)])
+				}
+				return out, nil
+			}
+		}
+	}
 	switch op {
 	case "+":
 		li, lok := intVal(l)
@@ -1781,6 +1805,44 @@ func padPercent(fv float64, sign string, a byte, fill byte, width int) string {
 		}
 	}
 	return padFieldA(s+"%", width, a, fill, false)
+}
+
+// setBinOp 实现集合的 | & - ^ 运算
+func setBinOp(op string, ls, rs *Set) (Object, error) {
+	out := NewSet()
+	switch op {
+	case "|":
+		for _, it := range ls.Order {
+			out.Add(it)
+		}
+		for _, it := range rs.Order {
+			out.Add(it)
+		}
+	case "&":
+		for _, it := range ls.Order {
+			if rs.Has(it) {
+				out.Add(it)
+			}
+		}
+	case "-":
+		for _, it := range ls.Order {
+			if !rs.Has(it) {
+				out.Add(it)
+			}
+		}
+	case "^":
+		for _, it := range ls.Order {
+			if !rs.Has(it) {
+				out.Add(it)
+			}
+		}
+		for _, it := range rs.Order {
+			if !ls.Has(it) {
+				out.Add(it)
+			}
+		}
+	}
+	return out, nil
 }
 
 func maxInt(a, b int) int {

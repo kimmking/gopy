@@ -458,21 +458,13 @@ var strMethods = map[string]MethodFn{
 		if len(args) < 1 {
 			return nil, argCountErr("startswith", len(args), 1)
 		}
-		p, ok := args[0].(string)
-		if !ok {
-			return nil, newExc("TypeError", "startswith() 需要字符串参数")
-		}
-		return strings.HasPrefix(recv.(string), p), nil
+		return prefixMatch(recv.(string), args[0], strings.HasPrefix)
 	},
 	"endswith": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
 		if len(args) < 1 {
 			return nil, argCountErr("endswith", len(args), 1)
 		}
-		p, ok := args[0].(string)
-		if !ok {
-			return nil, newExc("TypeError", "endswith() 需要字符串参数")
-		}
-		return strings.HasSuffix(recv.(string), p), nil
+		return prefixMatch(recv.(string), args[0], strings.HasSuffix)
 	},
 	"find": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
 		if len(args) < 1 {
@@ -617,7 +609,8 @@ var strMethods = map[string]MethodFn{
 		if !ok {
 			return nil, newExc("TypeError", "ljust() 需要整数宽度")
 		}
-		return padString(recv.(string), w, false), nil
+		fill := fillChar(args, 1)
+		return padWith(recv.(string), w, fill, false), nil
 	},
 	"rjust": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
 		if len(args) < 1 {
@@ -627,7 +620,8 @@ var strMethods = map[string]MethodFn{
 		if !ok {
 			return nil, newExc("TypeError", "rjust() 需要整数宽度")
 		}
-		return padString(recv.(string), w, true), nil
+		fill := fillChar(args, 1)
+		return padWith(recv.(string), w, fill, true), nil
 	},
 	"center": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
 		if len(args) < 1 {
@@ -642,9 +636,10 @@ var strMethods = map[string]MethodFn{
 		if w <= n {
 			return s, nil
 		}
+		fill := fillChar(args, 1)
 		total := w - n
 		left := total / 2
-		return strings.Repeat(" ", left) + s + strings.Repeat(" ", total-left), nil
+		return strings.Repeat(fill, left) + s + strings.Repeat(fill, total-left), nil
 	},
 	"zfill": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
 		if len(args) < 1 {
@@ -780,6 +775,7 @@ var strMethods = map[string]MethodFn{
 		}
 		return s, nil
 	},
+	"translate": strTranslate,
 	"expandtabs": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
 		tab := 8
 		if len(args) >= 1 {
@@ -806,6 +802,113 @@ var strMethods = map[string]MethodFn{
 		}
 		return sb.String(), nil
 	},
+}
+
+// prefixMatch 支持 startswith/endswith 的字符串或元组参数
+func prefixMatch(s string, pat Object, fn func(string, string) bool) (Object, error) {
+	switch p := pat.(type) {
+	case string:
+		return fn(s, p), nil
+	case *Tuple:
+		for _, it := range p.Items {
+			ps, ok := it.(string)
+			if !ok {
+				return nil, newExc("TypeError", "元组中的前缀/后缀必须是字符串")
+			}
+			if fn(s, ps) {
+				return true, nil
+			}
+		}
+		return false, nil
+	case *List:
+		for _, it := range p.Items {
+			ps, ok := it.(string)
+			if !ok {
+				return nil, newExc("TypeError", "列表中的前缀/后缀必须是字符串")
+			}
+			if fn(s, ps) {
+				return true, nil
+			}
+		}
+		return false, nil
+	}
+	return nil, newExc("TypeError", "startswith()/endswith() 需要字符串或元组参数")
+}
+
+// strMaketrans 实现 str.maketrans(x, y[, z])：返回字符映射表
+func strMaketrans(args []Object, kwargs map[string]Object) (Object, error) {
+	if len(args) < 2 {
+		return nil, argCountErr("maketrans", len(args), 2)
+	}
+	xs, ok1 := args[0].(string)
+	ys, ok2 := args[1].(string)
+	if !ok1 || !ok2 {
+		return nil, newExc("TypeError", "maketrans() 的参数必须是字符串")
+	}
+	xr, yr := []rune(xs), []rune(ys)
+	if len(xr) != len(yr) {
+		return nil, newExc("ValueError", "maketrans() 的两个字符串长度必须一致")
+	}
+	table := NewDict()
+	for i := range xr {
+		table.Set(string(xr[i]), string(yr[i]))
+	}
+	if len(args) >= 3 {
+		zs, ok := args[2].(string)
+		if !ok {
+			return nil, newExc("TypeError", "maketrans() 的删除字符必须是字符串")
+		}
+		for _, r := range zs {
+			table.Set(string(r), None)
+		}
+	}
+	return table, nil
+}
+
+// strTranslate 实现 str.translate(table)
+func strTranslate(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+	if len(args) < 1 {
+		return nil, argCountErr("translate", len(args), 1)
+	}
+	table, ok := args[0].(*Dict)
+	if !ok {
+		return nil, newExc("TypeError", "translate() 需要映射表参数")
+	}
+	s := recv.(string)
+	var sb strings.Builder
+	for _, r := range s {
+		if v, has := table.Get(string(r)); has {
+			if vs, ok := v.(string); ok && v != None {
+				sb.WriteString(vs)
+			}
+			continue
+		}
+		sb.WriteRune(r)
+	}
+	return sb.String(), nil
+}
+
+// fillChar 从 args[idx] 读取可选的单字符填充符（默认空格）
+func fillChar(args []Object, idx int) string {
+	if len(args) > idx {
+		if s, ok := args[idx].(string); ok && len([]rune(s)) == 1 {
+			return s
+		}
+	}
+	return " "
+}
+
+// padWith 按宽度与填充字符对齐
+func padWith(s string, width int, fill string, left bool) string {
+	n := len([]rune(s))
+	if width <= n {
+		return s
+	}
+	pad := strings.Repeat(fill, width-n)
+	if left {
+		return pad + s
+	}
+	return s + pad
 }
 
 func padString(s string, width int, left bool) string {
@@ -1014,6 +1117,24 @@ func sortObjectsByKey(items []Object, reverse bool) []Object {
 // ---------- 字典方法 ----------
 
 var dictMethods = map[string]MethodFn{
+	"fromkeys": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, argCountErr("fromkeys", len(args), 1)
+		}
+		items, err := iterate(args[0])
+		if err != nil {
+			return nil, err
+		}
+		var val Object = None
+		if len(args) >= 2 {
+			val = args[1]
+		}
+		out := NewDict()
+		for _, it := range items {
+			out.Set(it, val)
+		}
+		return out, nil
+	},
 	"keys": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
 		d := recv.(*Dict)
 		out := make([]Object, 0, d.Len())
@@ -1489,18 +1610,12 @@ var builtinFuncs = map[string]BuiltinFn{
 		if err != nil {
 			return nil, err
 		}
-		if len(items) == 0 {
-			return nil, newExc("ValueError", "min() 参数为空")
-		}
 		return minMax(items, false, kwargs)
 	},
 	"max": func(args []Object, kwargs map[string]Object) (Object, error) {
 		items, err := flattenArgs(args)
 		if err != nil {
 			return nil, err
-		}
-		if len(items) == 0 {
-			return nil, newExc("ValueError", "max() 参数为空")
 		}
 		return minMax(items, true, kwargs)
 	},
@@ -1513,7 +1628,22 @@ var builtinFuncs = map[string]BuiltinFn{
 			return nil, err
 		}
 		start := 0
-		if len(args) >= 2 {
+		if v, hasKw := kwargs["start"]; hasKw {
+			if i, ok := intVal(v); ok {
+				start = i
+			} else if f, ok := numVal(v); ok {
+				startObj := f
+				items, _ := iterate(args[0])
+				for _, it := range items {
+					fv, ok := numVal(it)
+					if !ok {
+						return nil, newExc("TypeError", "sum() 只能累加数值")
+					}
+					startObj += fv
+				}
+				return startObj, nil
+			}
+		} else if len(args) >= 2 {
 			start = 0
 			if i, ok := intVal(args[1]); ok {
 				start = i
@@ -1916,6 +2046,31 @@ var builtinFuncs = map[string]BuiltinFn{
 		}
 		return nil, newExc("TypeError", "next() 的参数必须是迭代器，实际为 '%s'", typeName(args[0]))
 	},
+	"format": func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, argCountErr("format", len(args), 1)
+		}
+		spec := ""
+		if len(args) >= 2 {
+			spec = Str(args[1])
+		}
+		return applyFormatSpec(args[0], spec)
+	},
+	"callable": func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) != 1 {
+			return nil, argCountErr("callable", len(args), 1)
+		}
+		switch x := args[0].(type) {
+		case *Function, *Builtin, *BuiltinMethod, *Method, *Class, *PyPartial, *PyLRU:
+			return true, nil
+		case *PyType:
+			return isExceptionTypeName(x.Name), nil
+		case *Instance:
+			_, ok := x.Class.LookupMethod("__call__")
+			return ok, nil
+		}
+		return false, nil
+	},
 	"iter": func(args []Object, kwargs map[string]Object) (Object, error) {
 		if len(args) != 1 {
 			return nil, argCountErr("iter", len(args), 1)
@@ -2074,6 +2229,12 @@ func flattenArgs(args []Object) ([]Object, error) {
 }
 
 func minMax(items []Object, wantMax bool, kwargs map[string]Object) (Object, error) {
+	if len(items) == 0 {
+		if v, ok := kwargs["default"]; ok {
+			return v, nil
+		}
+		return nil, newExc("ValueError", "min()/max() 参数为空")
+	}
 	if keyFn, ok := kwargs["key"]; ok {
 		best := items[0]
 		bestKey, err := callObjectRef(keyFn, []Object{best}, nil)

@@ -1768,6 +1768,17 @@ func getAttr(obj Object, name string) (Object, error) {
 	if builtinMethodExists(typeName(obj), name) {
 		return &BuiltinMethod{Recv: obj, Name: name}, nil
 	}
+	// 内建类型的类方法：str.maketrans / dict.fromkeys
+	if b, ok := obj.(*Builtin); ok {
+		if b.Name == "str" && name == "maketrans" {
+			return &Builtin{Name: "str.maketrans", Fn: strMaketrans}, nil
+		}
+		if b.Name == "dict" && name == "fromkeys" {
+			if _, ok := dictMethods["fromkeys"]; ok {
+				return &BuiltinMethod{Recv: NewDict(), Name: "fromkeys"}, nil
+			}
+		}
+	}
 	return nil, newExc("AttributeError", "'%s' 对象没有属性 '%s'", typeName(obj), name)
 }
 

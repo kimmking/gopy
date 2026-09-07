@@ -37,7 +37,7 @@ go run . path/to/script.py
 ./test.sh
 ```
 
-当前状态：`tests/01.py` … `tests/23.py` 与 `example.py` **全部与 `python3` 输出完全一致**。
+当前状态：`tests/01.py` … `tests/24.py` 与 `example.py` **全部与 `python3` 输出完全一致**。
 
 ## 整体架构
 
@@ -101,7 +101,8 @@ or < and < not < 比较(含 in/is) < | < ^ < & < 移位 < +- < */ // % < 一元 
 - 运算符：`+ - * / // % **`、比较 `> < >= <= == !=`、链式比较 `1 < x < 10`
 - 逻辑：`and` / `or` / `not`（短路求值）；位运算 `& | ^ ~ << >>`
 - 成员与身份：`in` / `not in` / `is` / `is not`
-- 增量赋值 `+= -= *= /= //= %= **=`，链式赋值 `a = b = 1`，元组解包（含嵌套）
+- 增量赋值 `+= -= *= /= //= %= **= &= |= ^= <<= >>=`，链式赋值 `a = b = 1`，元组解包（含嵌套）
+- 集合运算符 `| & - ^`；字典合并 `|` 与 `|=`（Python 3.9+）
 - 序列运算：字符串/列表/元组拼接，`str * n` 与 `list * n` 重复
 - 三元条件表达式：`a if cond else b`
 
@@ -130,9 +131,10 @@ or < and < not < 比较(含 in/is) < | < ^ < & < 移位 < +- < */ // % < 一元 
 **字符串、列表、字典、集合、元组**
 
 - f-string：插值、转换符 `!r` `!s`、格式说明符（宽度/对齐/精度/`d x b o e f g %`）
-- 字符串：`upper lower capitalize title swapcase strip lstrip rstrip split rsplit splitlines join startswith endswith find rfind index count replace isdigit isalpha isalnum isspace isupper islower ljust rjust center zfill partition rpartition istitle isnumeric isdecimal casefold removeprefix removesuffix expandtabs`，以及 printf 风格格式化 `str % (...)`（`%s %r %d %i %u %o %x %X %b %e %E %f %F %g %G %c %%`，支持宽度/精度/对齐/`#`/`+`/` ` 标志与 `%(name)s` 字典映射）与 `str.format(...)`（`{}` 自动编号、`{0}`/`{name}`、`:` 格式说明符、`!r`/`!s` 转换）
+- 字符串：`upper lower capitalize title swapcase strip lstrip rstrip split rsplit splitlines join startswith endswith find rfind index count replace isdigit isalpha isalnum isspace isupper islower ljust rjust center zfill partition rpartition istitle isnumeric isdecimal casefold removeprefix removesuffix expandtabs maketrans translate`（startswith/endswith 支持元组，ljust/rjust/center 支持填充字符），以及 printf 风格格式化 `str % (...)`（`%s %r %d %i %u %o %x %X %b %e %E %f %F %g %G %c %%`，支持宽度/精度/对齐/`#`/`+`/` ` 标志与 `%(name)s` 字典映射）与 `str.format(...)`（`{}` 自动编号、`{0}`/`{name}`、`:` 格式说明符、`!r`/`!s` 转换）
 - 列表：`append extend insert remove pop clear index count sort(key/reverse) reverse copy`
-- 字典：`keys values items get pop setdefault update clear copy`（保持插入顺序）
+- 字典：`keys values items get pop setdefault update clear copy fromkeys`（保持插入顺序）
+- min/max：`key` 与 `default` 关键字；`sum`：`start` 关键字
 - 集合：`add remove discard clear copy union intersection difference`
 - 元组：`count index`
 - 切片：完整 Python 语义，支持负数下标、负步长（`s[::-1]`）、越界截断
@@ -166,7 +168,7 @@ or < and < not < 比较(含 in/is) < | < ^ < & < 移位 < +- < */ // % < 一元 
 
 **内置函数**
 
-`print len str repr type int float bool list tuple dict set range abs round pow divmod min max sum sorted reversed enumerate zip map filter any all chr ord hex oct bin isinstance hasattr getattr setattr id input exit long next iter property staticmethod classmethod`
+`print len str repr type int float bool list tuple dict set range abs round pow divmod min max sum sorted reversed enumerate zip map filter any all chr ord hex oct bin isinstance issubclass hasattr getattr setattr id input exit long next iter property staticmethod classmethod super format callable`
 
 > `long` 为兼容 Python 2 的长整型转换，在本解释器中与 `int` 等价（支持 `base`）。
 
@@ -213,6 +215,7 @@ or < and < not < 比较(含 in/is) < | < ^ < & < 移位 < +- < */ // % < 一元 
 | `tests/21.py` | collections：Counter（计数/most_common/elements/update）、defaultdict（list/int/str 工厂）、OrderedDict（move_to_end/popitem）、deque（双端操作/rotate） |
 | `tests/22.py` | functools：reduce/partial/lru_cache（含递归缓存与 cache_info）；itertools：count/cycle/repeat/chain/islice/accumulate/product/permutations/combinations/takewhile/dropwhile/starmap；括号 from-import |
 | `tests/23.py` | 自定义异常类继承链匹配、`e.args`、`raise from` 与 `__cause__`、except 元组、异常实例即对象（str/repr）、try/finally return 覆盖 |
+| `tests/24.py` | `str.maketrans/translate`、元组 startswith/endswith、填充字符、`dict.fromkeys`、dict/set 运算符、min/max default、`format`/`callable`、`sum(start=)` |
 | `example.py` | 综合示例（脚本级冒烟测试） |
 
 ## 实现要点与已知取舍
