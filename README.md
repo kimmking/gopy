@@ -37,7 +37,7 @@ go run . path/to/script.py
 ./test.sh
 ```
 
-当前状态：`tests/01.py` … `tests/20.py` 与 `example.py` **全部与 `python3` 输出完全一致**。
+当前状态：`tests/01.py` … `tests/21.py` 与 `example.py` **全部与 `python3` 输出完全一致**。
 
 ## 整体架构
 
@@ -175,6 +175,8 @@ or < and < not < 比较(含 in/is) < | < ^ < & < 移位 < +- < */ // % < 一元 
 
 **`sys`**：`argv version platform exit`
 
+**`collections`**：`Counter`（`most_common elements update subtract`、缺失键返回 0、repr 按 most_common 排序）、`defaultdict`（缺失键调用工厂函数）、`OrderedDict`（`move_to_end popitem`）、`deque`（`append appendleft pop popleft extend extendleft rotate remove clear reverse copy index count`）
+
 ## 测试目录（回归用例）
 
 `test.sh` 会依次用 `python3` 与 `./gopy` 运行每个脚本并 `diff`，全部一致才通过。每个用例聚焦一类特性：
@@ -201,6 +203,7 @@ or < and < not < 比较(含 in/is) < | < ^ < & < 移位 < +- < */ // % < 一元 
 | `tests/18.py` | `with` 语句：进入/退出顺序、异常传播与抑制（`__exit__` 返回 True）、嵌套与多上下文项、资源类、`return`/`break` 穿过 with、`exc_type.__name__` |
 | `tests/19.py` | 运算符重载（算术/反射/比较/`len`/下标/`in`/`__call__`/`__bool__`）、`__repr__`/`__str__` 分工、`@property`/`@staticmethod`/`@classmethod`、类属性赋值 |
 | `tests/20.py` | 多继承 C3 MRO、零参 `super()`（方法链/菱形协作 `__init__`/类方法中）、`isinstance`/`issubclass`、Mixin |
+| `tests/21.py` | collections：Counter（计数/most_common/elements/update）、defaultdict（list/int/str 工厂）、OrderedDict（move_to_end/popitem）、deque（双端操作/rotate） |
 | `example.py` | 综合示例（脚本级冒烟测试） |
 
 ## 实现要点与已知取舍

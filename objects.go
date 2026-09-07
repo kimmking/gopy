@@ -333,6 +333,21 @@ type Module struct {
 	Attrs map[string]Object
 }
 
+// PyCounter collections.Counter：底层为 *Dict
+type PyCounter struct{ D *Dict }
+
+// PyDefaultDict collections.defaultdict
+type PyDefaultDict struct {
+	D       *Dict
+	Factory Object
+}
+
+// PyOrderedDict collections.OrderedDict
+type PyOrderedDict struct{ D *Dict }
+
+// PyDeque collections.deque
+type PyDeque struct{ Items []Object }
+
 // PyType 表示类型对象（内建类型与异常类）
 type PyType struct {
 	Name string
@@ -462,6 +477,14 @@ func typeName(v Object) string {
 		return x.Class.Name
 	case *Module:
 		return "module"
+	case *PyCounter:
+		return "Counter"
+	case *PyDefaultDict:
+		return "defaultdict"
+	case *PyOrderedDict:
+		return "OrderedDict"
+	case *PyDeque:
+		return "deque"
 	}
 	return "object"
 }
@@ -651,6 +674,40 @@ func instanceToString(inst *Instance) string {
 	return instanceRepr(inst)
 }
 
+// factoryRepr 输出 defaultdict 工厂的 CPython 风格表示：内建类型显示为 <class 'x'>
+func factoryRepr(f Object) string {
+	if b, ok := f.(*Builtin); ok {
+		switch b.Name {
+		case "int", "float", "str", "bool", "list", "tuple", "dict", "set":
+			return "<class '" + b.Name + "'>"
+		}
+	}
+	return Repr(f)
+}
+
+// mostCommon 返回按计数降序（稳定）排列的 (key, count) 元组列表
+func (c *PyCounter) mostCommon() []Object {
+	type pair struct {
+		idx int
+		t   *Tuple
+	}
+	pairs := make([]pair, 0, c.D.Len())
+	for i, k := range c.D.Keys {
+		v := c.D.Vals[keyOf(k)]
+		pairs = append(pairs, pair{i, &Tuple{Items: []Object{k, v}}})
+	}
+	sort.SliceStable(pairs, func(a, b int) bool {
+		ca, _ := numVal(pairs[a].t.Items[1])
+		cb, _ := numVal(pairs[b].t.Items[1])
+		return ca > cb
+	})
+	out := make([]Object, len(pairs))
+	for i, p := range pairs {
+		out[i] = p.t
+	}
+	return out
+}
+
 // Repr 生成 Python repr()
 func Repr(v Object) string {
 	switch x := v.(type) {
@@ -720,6 +777,27 @@ func Repr(v Object) string {
 		return instanceRepr(x)
 	case *Module:
 		return "<module '" + x.Name + "'>"
+	case *PyCounter:
+		parts := make([]string, 0)
+		for _, kv := range x.mostCommon() {
+			pair := kv.(*Tuple).Items
+			parts = append(parts, Repr(pair[0])+": "+Repr(pair[1]))
+		}
+		return "Counter({" + strings.Join(parts, ", ") + "})"
+	case *PyDefaultDict:
+		return "defaultdict(" + factoryRepr(x.Factory) + ", " + Repr(x.D) + ")"
+	case *PyOrderedDict:
+		parts := make([]string, 0, x.D.Len())
+		for _, k := range x.D.Keys {
+			parts = append(parts, "("+Repr(k)+", "+Repr(x.D.Vals[keyOf(k)])+")")
+		}
+		return "OrderedDict([" + strings.Join(parts, ", ") + "])"
+	case *PyDeque:
+		parts := make([]string, len(x.Items))
+		for i, it := range x.Items {
+			parts[i] = Repr(it)
+		}
+		return "deque([" + strings.Join(parts, ", ") + "])"
 	case *PyException:
 		if x.Msg == "" {
 			return x.ExcType + "()"
@@ -1698,6 +1776,20 @@ func iterate(v Object) ([]Object, error) {
 			return nil, newExc("RuntimeError", "解释器尚未初始化")
 		}
 		return generatorIterateHook(x)
+	case *PyCounter:
+		out := make([]Object, 0, x.D.Len())
+		out = append(out, x.D.Keys...)
+		return out, nil
+	case *PyDefaultDict:
+		out := make([]Object, 0, x.D.Len())
+		out = append(out, x.D.Keys...)
+		return out, nil
+	case *PyOrderedDict:
+		out := make([]Object, 0, x.D.Len())
+		out = append(out, x.D.Keys...)
+		return out, nil
+	case *PyDeque:
+		return x.Items, nil
 	}
 	return nil, newExc("TypeError", "'%s' 对象不可迭代", typeName(v))
 }
@@ -1729,6 +1821,22 @@ func contains(needle, hay Object) (bool, error) {
 	case *Dict:
 		_, ok := x.Get(needle)
 		return ok, nil
+	case *PyCounter:
+		_, ok := x.D.Get(needle)
+		return ok, nil
+	case *PyDefaultDict:
+		_, ok := x.D.Get(needle)
+		return ok, nil
+	case *PyOrderedDict:
+		_, ok := x.D.Get(needle)
+		return ok, nil
+	case *PyDeque:
+		for _, it := range x.Items {
+			if objectsEqual(it, needle) {
+				return true, nil
+			}
+		}
+		return false, nil
 	case string:
 		s, ok := needle.(string)
 		if !ok {

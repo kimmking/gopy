@@ -611,6 +611,28 @@ func (i *Interpreter) setItem(obj, key, v Object) error {
 		}
 		x.Items[n] = v
 		return nil
+	case *PyCounter:
+		x.D.Set(key, v)
+		return nil
+	case *PyDefaultDict:
+		x.D.Set(key, v)
+		return nil
+	case *PyOrderedDict:
+		x.D.Set(key, v)
+		return nil
+	case *PyDeque:
+		n, ok := intVal(key)
+		if !ok {
+			return newExc("TypeError", "deque 下标必须是整数")
+		}
+		if n < 0 {
+			n += len(x.Items)
+		}
+		if n < 0 || n >= len(x.Items) {
+			return newExc("IndexError", "deque assignment index out of range")
+		}
+		x.Items[n] = v
+		return nil
 	}
 	return newExc("TypeError", "'%s' 对象不支持下标赋值", typeName(obj))
 }
@@ -1426,6 +1448,38 @@ func (i *Interpreter) getItem(obj, key Object) (Object, error) {
 			return nil, newExc("IndexError", "range object index out of range")
 		}
 		return x.At(n), nil
+	case *PyCounter:
+		if v, ok := x.D.Get(key); ok {
+			return v, nil
+		}
+		return 0, nil
+	case *PyDefaultDict:
+		if v, ok := x.D.Get(key); ok {
+			return v, nil
+		}
+		v, err := callObjectRef(x.Factory, nil, nil)
+		if err != nil {
+			return nil, err
+		}
+		x.D.Set(key, v)
+		return v, nil
+	case *PyOrderedDict:
+		if v, ok := x.D.Get(key); ok {
+			return v, nil
+		}
+		return nil, newExc("KeyError", "%s", Repr(key))
+	case *PyDeque:
+		n, ok := intVal(key)
+		if !ok {
+			return nil, newExc("TypeError", "deque 下标必须是整数")
+		}
+		if n < 0 {
+			n += len(x.Items)
+		}
+		if n < 0 || n >= len(x.Items) {
+			return nil, newExc("IndexError", "deque index out of range")
+		}
+		return x.Items[n], nil
 	}
 	return nil, newExc("TypeError", "'%s' 对象不支持下标访问", typeName(obj))
 }
@@ -1499,6 +1553,24 @@ func builtinMethodExists(typeStr, name string) bool {
 		return ok
 	case "set":
 		_, ok := setMethods[name]
+		return ok
+	case "Counter":
+		_, ok := counterMethods[name]
+		if !ok {
+			_, ok = dictMethods[name]
+		}
+		return ok
+	case "defaultdict":
+		_, ok := dictMethods[name]
+		return ok
+	case "OrderedDict":
+		_, ok := orderedDictMethods[name]
+		if !ok {
+			_, ok = dictMethods[name]
+		}
+		return ok
+	case "deque":
+		_, ok := dequeMethods[name]
 		return ok
 	}
 	return false

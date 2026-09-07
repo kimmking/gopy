@@ -39,8 +39,285 @@ func callBuiltinMethod(recv Object, name string, args []Object, kwargs map[strin
 		if fn, ok := setMethods[name]; ok {
 			return fn(recv, args, kwargs)
 		}
+	case "Counter":
+		if fn, ok := counterMethods[name]; ok {
+			return fn(recv, args, kwargs)
+		}
+		if fn, ok := dictMethods[name]; ok {
+			return fn(recv.(*PyCounter).D, args, kwargs)
+		}
+	case "defaultdict":
+		if fn, ok := dictMethods[name]; ok {
+			return fn(recv.(*PyDefaultDict).D, args, kwargs)
+		}
+	case "OrderedDict":
+		if fn, ok := orderedDictMethods[name]; ok {
+			return fn(recv, args, kwargs)
+		}
+		if fn, ok := dictMethods[name]; ok {
+			return fn(recv.(*PyOrderedDict).D, args, kwargs)
+		}
+	case "deque":
+		if fn, ok := dequeMethods[name]; ok {
+			return fn(recv, args, kwargs)
+		}
 	}
 	return nil, newExc("AttributeError", "'%s' 对象没有属性 '%s'", typeName(recv), name)
+}
+
+// ---------- collections 方法 ----------
+
+var counterMethods = map[string]MethodFn{
+	"most_common": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		all := recv.(*PyCounter).mostCommon()
+		if len(args) == 0 {
+			return &List{Items: all}, nil
+		}
+		n, ok := intVal(args[0])
+		if !ok {
+			return nil, newExc("TypeError", "most_common() 的参数必须是整数")
+		}
+		if n < 0 {
+			n = 0
+		}
+		if n > len(all) {
+			n = len(all)
+		}
+		return &List{Items: all[:n]}, nil
+	},
+	"elements": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		c := recv.(*PyCounter)
+		out := []Object{}
+		for _, k := range c.D.Keys {
+			n, _ := intVal(c.D.Vals[keyOf(k)])
+			for i := 0; i < n; i++ {
+				out = append(out, k)
+			}
+		}
+		return &List{Items: out}, nil
+	},
+	"update": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		c := recv.(*PyCounter)
+		for _, a := range args {
+			if d, ok := a.(*Dict); ok {
+				for _, k := range d.Keys {
+					addCount(c.D, k, d.Vals[keyOf(k)])
+				}
+				continue
+			}
+			items, err := iterate(a)
+			if err != nil {
+				return nil, err
+			}
+			for _, it := range items {
+				addCount(c.D, it, 1)
+			}
+		}
+		return None, nil
+	},
+	"subtract": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		c := recv.(*PyCounter)
+		for _, a := range args {
+			items, err := iterate(a)
+			if err != nil {
+				return nil, err
+			}
+			for _, it := range items {
+				addCount(c.D, it, -1)
+			}
+		}
+		return None, nil
+	},
+}
+
+// addCount 给计数表中的键加上 delta（保持插入顺序）
+func addCount(d *Dict, k Object, delta Object) {
+	cur := 0
+	if v, ok := d.Get(k); ok {
+		if ci, ok2 := intVal(v); ok2 {
+			cur = ci
+		}
+	}
+	di, _ := intVal(delta)
+	d.Set(k, cur+di)
+}
+
+var orderedDictMethods = map[string]MethodFn{
+	"move_to_end": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		od := recv.(*PyOrderedDict)
+		if len(args) < 1 {
+			return nil, argCountErr("move_to_end", len(args), 1)
+		}
+		key := args[0]
+		v, ok := od.D.Get(key)
+		if !ok {
+			return nil, newExc("KeyError", "%s", Repr(key))
+		}
+		od.D.Delete(key)
+		od.D.Set(key, v)
+		return None, nil
+	},
+	"popitem": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		od := recv.(*PyOrderedDict)
+		if od.D.Len() == 0 {
+			return nil, newExc("KeyError", "popitem(): dictionary is empty")
+		}
+		// last=True（默认）弹出最后一个；last=False 弹出第一个
+		last := true
+		if v, ok := kwargs["last"]; ok {
+			last = truthy(v)
+		}
+		var k Object
+		if last {
+			k = od.D.Keys[len(od.D.Keys)-1]
+		} else {
+			k = od.D.Keys[0]
+		}
+		v, _ := od.D.Get(k)
+		od.D.Delete(k)
+		return &Tuple{Items: []Object{k, v}}, nil
+	},
+}
+
+var dequeMethods = map[string]MethodFn{
+	"append": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) != 1 {
+			return nil, argCountErr("append", len(args), 1)
+		}
+		d := recv.(*PyDeque)
+		d.Items = append(d.Items, args[0])
+		return None, nil
+	},
+	"appendleft": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) != 1 {
+			return nil, argCountErr("appendleft", len(args), 1)
+		}
+		d := recv.(*PyDeque)
+		d.Items = append([]Object{args[0]}, d.Items...)
+		return None, nil
+	},
+	"pop": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		d := recv.(*PyDeque)
+		if len(d.Items) == 0 {
+			return nil, newExc("IndexError", "pop from an empty deque")
+		}
+		v := d.Items[len(d.Items)-1]
+		d.Items = d.Items[:len(d.Items)-1]
+		return v, nil
+	},
+	"popleft": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		d := recv.(*PyDeque)
+		if len(d.Items) == 0 {
+			return nil, newExc("IndexError", "pop from an empty deque")
+		}
+		v := d.Items[0]
+		d.Items = d.Items[1:]
+		return v, nil
+	},
+	"extend": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) != 1 {
+			return nil, argCountErr("extend", len(args), 1)
+		}
+		items, err := iterate(args[0])
+		if err != nil {
+			return nil, err
+		}
+		d := recv.(*PyDeque)
+		d.Items = append(d.Items, items...)
+		return None, nil
+	},
+	"extendleft": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) != 1 {
+			return nil, argCountErr("extendleft", len(args), 1)
+		}
+		items, err := iterate(args[0])
+		if err != nil {
+			return nil, err
+		}
+		d := recv.(*PyDeque)
+		// extendleft 按逆序追加到左端
+		for i := len(items) - 1; i >= 0; i-- {
+			d.Items = append([]Object{items[i]}, d.Items...)
+		}
+		return None, nil
+	},
+	"rotate": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, argCountErr("rotate", len(args), 1)
+		}
+		n, ok := intVal(args[0])
+		if !ok {
+			return nil, newExc("TypeError", "rotate() 的参数必须是整数")
+		}
+		d := recv.(*PyDeque)
+		l := len(d.Items)
+		if l == 0 {
+			return None, nil
+		}
+		n = ((n % l) + l) % l
+		if n == 0 {
+			return None, nil
+		}
+		out := make([]Object, 0, l)
+		out = append(out, d.Items[l-n:]...)
+		out = append(out, d.Items[:l-n]...)
+		d.Items = out
+		return None, nil
+	},
+	"remove": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) != 1 {
+			return nil, argCountErr("remove", len(args), 1)
+		}
+		d := recv.(*PyDeque)
+		for i, it := range d.Items {
+			if objectsEqual(it, args[0]) {
+				d.Items = append(d.Items[:i], d.Items[i+1:]...)
+				return None, nil
+			}
+		}
+		return nil, newExc("ValueError", "deque.remove(x): x not in deque")
+	},
+	"clear": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		recv.(*PyDeque).Items = nil
+		return None, nil
+	},
+	"reverse": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		d := recv.(*PyDeque)
+		for i, j := 0, len(d.Items)-1; i < j; i, j = i+1, j-1 {
+			d.Items[i], d.Items[j] = d.Items[j], d.Items[i]
+		}
+		return None, nil
+	},
+	"copy": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		d := recv.(*PyDeque)
+		out := make([]Object, len(d.Items))
+		copy(out, d.Items)
+		return &PyDeque{Items: out}, nil
+	},
+	"index": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, argCountErr("index", len(args), 1)
+		}
+		d := recv.(*PyDeque)
+		for i, it := range d.Items {
+			if objectsEqual(it, args[0]) {
+				return i, nil
+			}
+		}
+		return nil, newExc("ValueError", "%s is not in deque", Repr(args[0]))
+	},
+	"count": func(recv Object, args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) != 1 {
+			return nil, argCountErr("count", len(args), 1)
+		}
+		n := 0
+		for _, it := range recv.(*PyDeque).Items {
+			if objectsEqual(it, args[0]) {
+				n++
+			}
+		}
+		return n, nil
+	},
 }
 
 func kwBool(kwargs map[string]Object, key string) bool {
@@ -1000,6 +1277,14 @@ var builtinFuncs = map[string]BuiltinFn{
 				}
 				return nil, newExc("TypeError", "__len__ 返回值必须是整数")
 			}
+		case *PyCounter:
+			return x.D.Len(), nil
+		case *PyDefaultDict:
+			return x.D.Len(), nil
+		case *PyOrderedDict:
+			return x.D.Len(), nil
+		case *PyDeque:
+			return len(x.Items), nil
 		}
 		return nil, newExc("TypeError", "'%s' 对象没有长度", typeName(args[0]))
 	},
@@ -1659,6 +1944,9 @@ func formatRadix(n int, prefix string, radix int) string {
 
 // convertToInt 实现 int() / long() 的转换逻辑（支持进制参数）
 func convertToInt(args []Object) (Object, error) {
+	if len(args) == 0 {
+		return 0, nil
+	}
 	v := args[0]
 	base := 10
 	if len(args) >= 2 {
@@ -2634,6 +2922,91 @@ func newSysModule(argv []Object) *Module {
 	return m
 }
 
+// newCollectionsModule 构造 collections 模块
+func newCollectionsModule() *Module {
+	m := &Module{Name: "collections", Attrs: map[string]Object{}}
+	bind := func(name string, fn func(args []Object, kwargs map[string]Object) (Object, error)) {
+		m.Attrs[name] = &Builtin{Name: "collections." + name, Fn: fn}
+	}
+	bind("Counter", func(args []Object, kwargs map[string]Object) (Object, error) {
+		c := &PyCounter{D: NewDict()}
+		if len(args) > 0 {
+			if d, ok := args[0].(*Dict); ok {
+				for _, k := range d.Keys {
+					c.D.Set(k, d.Vals[keyOf(k)])
+				}
+			} else if s, ok := args[0].(string); ok {
+				for _, r := range s {
+					addCount(c.D, string(r), 1)
+				}
+			} else {
+				items, err := iterate(args[0])
+				if err != nil {
+					return nil, err
+				}
+				for _, it := range items {
+					addCount(c.D, it, 1)
+				}
+			}
+		}
+		for k, v := range kwargs {
+			c.D.Set(k, v)
+		}
+		return c, nil
+	})
+	bind("defaultdict", func(args []Object, kwargs map[string]Object) (Object, error) {
+		factory := Object(None)
+		if len(args) > 0 {
+			factory = args[0]
+			args = args[1:]
+		}
+		d := &PyDefaultDict{D: NewDict(), Factory: factory}
+		for _, a := range args {
+			if other, ok := a.(*Dict); ok {
+				for _, k := range other.Keys {
+					d.D.Set(k, other.Vals[keyOf(k)])
+				}
+			}
+		}
+		for k, v := range kwargs {
+			d.D.Set(k, v)
+		}
+		return d, nil
+	})
+	bind("OrderedDict", func(args []Object, kwargs map[string]Object) (Object, error) {
+		od := &PyOrderedDict{D: NewDict()}
+		for _, a := range args {
+			items, err := iterate(a)
+			if err != nil {
+				return nil, err
+			}
+			for _, it := range items {
+				p, ok := it.(*Tuple)
+				if !ok || len(p.Items) != 2 {
+					return nil, newExc("ValueError", "OrderedDict 的元素必须是 (key, value) 二元组")
+				}
+				od.D.Set(p.Items[0], p.Items[1])
+			}
+		}
+		for k, v := range kwargs {
+			od.D.Set(k, v)
+		}
+		return od, nil
+	})
+	bind("deque", func(args []Object, kwargs map[string]Object) (Object, error) {
+		d := &PyDeque{}
+		if len(args) > 0 {
+			items, err := iterate(args[0])
+			if err != nil {
+				return nil, err
+			}
+			d.Items = append(d.Items, items...)
+		}
+		return d, nil
+	})
+	return m
+}
+
 // exceptionTypeNames 是支持的内建异常类型
 var exceptionTypeNames = []string{
 	"Exception", "BaseException", "ValueError", "TypeError", "IndexError",
@@ -2661,6 +3034,7 @@ func initGlobalEnv(argv []Object) *Environment {
 	env.Set("math", newMathModule())
 	env.Set("os", newOsModule())
 	env.Set("sys", newSysModule(argv))
+	env.Set("collections", newCollectionsModule())
 	for _, name := range exceptionTypeNames {
 		env.Set(name, &PyType{Name: name})
 	}
